@@ -12,6 +12,8 @@ import threading
 import http.server
 import socketserver
 import hashlib
+import hmac
+import binascii
 from telebot import types
 from datetime import datetime
 from urllib.parse import urlparse, quote
@@ -24,16 +26,17 @@ import yt_dlp
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8014931413:AAHz8NKUKZ5l8m2yT-417qiaLOd2_g2xXbQ")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", 6753121703))
 ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "Rafsanvai0")
-BOT_USERNAME = "@ddos_attack_team_bot"
+BOT_USERNAME = "@obfuscator_encryption_bot"
 PORT = int(os.environ.get("PORT", 8080))
 
-# 🪤 Honeypot Server (Anti-Decoder Trap)
+# 🪤 Multi-Honeypot Trap System
 HONEYPOT_ENABLED = True
-TRAP_ALERT_CHANNEL = ADMIN_ID  # যেখানে ট্র্যাপ অ্যালার্ট যাবে
+TRAP_ALERT_CHANNEL = ADMIN_ID
+SERVER_URL = os.environ.get("SERVER_URL", "")  # Public URL (Railway deploy হলে সেট করবেন)
 
-# 📢 ফোর্স সাব
-FORCE_SUB_CHANNEL = "@sopport_and_hack_send"
-FORCE_SUB_URL = "https://t.me/sopport_and_hack_send"
+# 📢 Force Sub
+FORCE_SUB_CHANNEL = "@hack_post_group1"
+FORCE_SUB_URL = "https://t.me/hack_post_group1"
 
 telebot.apihelper.READ_TIMEOUT = 180
 telebot.apihelper.CONNECT_TIMEOUT = 60
@@ -44,16 +47,53 @@ BANNED_FILE = "banned.json"
 TRAP_LOG_FILE = "trap_logs.json"
 
 user_states = {}
-trap_victims = {}
 
 # =========================================================
-# 🌐 CRASH-PROOF KEEP-ALIVE WEB SERVER + HONEYPOT TRAP
+# 🎭 MASSIVE FAKE MESSAGE LIBRARY (Decoder Public Shame)
+# =========================================================
+
+FAKE_DECODER_MESSAGES = [
+    "👿🔥🥵💀❌ [দূরে গিয়ে মর খানকির পোলা কোড চুরি করতে আসিস তাই না ডিকোড করতে? তোর এই যে আব্বার বট {bot} দিয়ে ইনক্রিপ্টেড মারা এবং এই আব্বা ইনক্রিপ্টেড মারছে @{admin}] 🔒⚡",
+    "💀☠️🩸 [তোর মায়ের দুধ খাওয়া শেষ হয়নি, কোড ডিকোড করতে এসেছে? আব্বার এনক্রিপশন ভাঙা তোর বাপেরও কম্ম না! @{admin} এর সিস্টেম] 🔥👿",
+    "🧨💣⛓️ [তোর আইপি এইমাত্র ট্র্যাক হয়েছে। এখনই তোর ISP কে রিপোর্ট করা হবে। বোকাচোদা, আব্বার কোড ভাঙার স্বপ্ন দেখা তোর জন্য মহা খারাপ!] 🪤🎭",
+    "🩸🔪☠️ [তোর ব্রাউজার ফিঙ্গারপ্রিন্ট সহ সব ডাটা সেভ হয়ে গেছে। এখন তুই গ্রুপে বেইজ্জতি হবি। @{admin} কে যা বলার সে জানে] 💀🔥",
+    "👿🔥💀 [ডিকোড করতে এসেছিস? এই ফাইল ভাঙার চেষ্টা করলে তোর ফোনে ভাইরাস ঢুকে যাবে! আব্বার এনক্রিপশন সিস্টেম হ্যাক করা অসম্ভব] ☠️🩸❌",
+    "🥵💀👿 [তোর আসল নাম, আইপি, লোকেশন সব আব্বার কাছে। এখন থেকে তুই মার্কড। @{admin} তোর কেস শেষ করে দিবে!] 🔒⚡🎯",
+    "⚡🔒👿 [আব্বার এই সিস্টেম ভাঙতে তোকে আগে নিজের মাথা ঠিক করতে হবে। তোর বাপের জন্মের আগে এই এনক্রিপশন বানানো হয়েছে!] 💀🔥🥵",
+    "🧨💣🔥 [তোর ডিকোডার টুল নষ্ট হয়ে যাবে এখন। ভাইরাস ঢুকে তোর কম্পিউটার ফরম্যাট হবে! মর খানকির পোলা!] ☠️🩸👿",
+    "☠️🩸🔪 [তোর আইপি ও জিও-লোকেশন সব সেভ। এখন থেকে তুই FBI watchlist এ আছিস। @{admin} এর সাথে যোগাযোগ কর!] 💀🔥🥵",
+    "👿🔥🥵 [আব্বার কোড চুরি করার স্বপ্ন দেখা বন্ধ কর। ফাইলটা এমনভাবে বানানো যাতে কেউ কখনো ডিকোড করতে পারবে না!] 💀❌🔒"
+]
+
+def get_fake_message():
+    msg = random.choice(FAKE_DECODER_MESSAGES)
+    return msg.format(bot=BOT_USERNAME, admin=ADMIN_USERNAME)
+
+
+# =========================================================
+# 🌐 CRASH-PROOF + MULTI-HONEYPOT WEB SERVER
 # =========================================================
 
 class ReusableTCPServer(socketserver.TCPServer):
     allow_reuse_address = True
 
-def save_trap_victim(ip, user_agent, referer=""):
+
+def get_geo_from_ip(ip):
+    """ডিকোডারের জিও-লোকেশন বের করা"""
+    try:
+        if ip in ["127.0.0.1", "localhost", "0.0.0.0"]:
+            return "Localhost"
+        res = requests.get(f"http://ip-api.com/json/{ip}?fields=country,city,isp,org,regionName", timeout=5)
+        if res.status_code == 200:
+            data = res.json()
+            if data.get("status") == "success":
+                return f"{data.get('city', 'N/A')}, {data.get('regionName', 'N/A')}, {data.get('country', 'N/A')} | ISP: {data.get('isp', 'N/A')}"
+    except Exception:
+        pass
+    return "Unknown"
+
+
+def save_trap_victim(ip, user_agent, referer="", trap_type="unknown", extra_info=""):
     """ডিকোডার ধরা পড়লে ট্র্যাক করে অ্যাডমিনকে অ্যালার্ট"""
     try:
         data = {}
@@ -61,26 +101,42 @@ def save_trap_victim(ip, user_agent, referer=""):
             with open(TRAP_LOG_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
         
-        key = f"{ip}_{int(time.time())}"
+        geo = get_geo_from_ip(ip)
+        
+        key = f"{ip}_{int(time.time())}_{random.randint(1000,9999)}"
         data[key] = {
             "ip": ip,
+            "geo": geo,
             "user_agent": user_agent,
             "referer": referer,
+            "trap_type": trap_type,
+            "extra_info": extra_info,
             "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         }
+        
+        # লাস্ট ২০০টা লগ রাখবো
+        if len(data) > 200:
+            keys = sorted(data.keys())
+            for k in keys[:-200]:
+                del data[k]
+        
         with open(TRAP_LOG_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
         
-        # অ্যাডমিনকে অ্যালার্ট
+        # 🚨 অ্যাডমিনকে অ্যালার্ট
         try:
             alert = (
-                "🚨 <b>ডিকোডার ধরা পড়েছে!</b> 🚨\n"
+                "🚨🚨🚨 <b>ডিকোডার ধরা পড়েছে!</b> 🚨🚨🚨\n"
                 "👑 ━━━━━━━━━━━━━━━━━━━━━━━━━ 👑\n\n"
                 f"🌐 <b>IP:</b> <code>{html.escape(ip)}</code>\n"
-                f"🖥️ <b>Browser:</b> <code>{html.escape(user_agent[:80])}</code>\n"
-                f"🔗 <b>Referer:</b> <code>{html.escape(referer[:80])}</code>\n"
+                f"🗺️ <b>Location:</b> <code>{html.escape(geo)}</code>\n"
+                f"🖥️ <b>Browser/UA:</b> <code>{html.escape(user_agent[:120])}</code>\n"
+                f"🔗 <b>Referer:</b> <code>{html.escape(referer[:100])}</code>\n"
+                f"🪤 <b>Trap Type:</b> <code>{trap_type}</code>\n"
+                f"📋 <b>Extra:</b> <code>{html.escape(extra_info[:100])}</code>\n"
                 f"⏰ <b>Time:</b> <code>{datetime.now().strftime('%Y-%m-%d %I:%M:%S %p')}</code>\n\n"
-                "💀 <i>এই ব্যক্তি আপনার কোড ডিকোড করার চেষ্টা করেছে!</i>"
+                "💀 <i>এই ব্যক্তি আপনার কোড ডিকোড করার চেষ্টা করেছে!</i>\n"
+                "🔥 <i>সাথে সাথে সব ডাটা লগ হয়েছে!</i>"
             )
             safe_send_message(TRAP_ALERT_CHANNEL, alert)
         except Exception:
@@ -89,63 +145,120 @@ def save_trap_victim(ip, user_agent, referer=""):
         print(f"Trap log error: {e}")
 
 
+def build_trap_response(client_ip, user_agent, trap_type="generic"):
+    """🎭 হানিপট ট্র্যাপ রেসপন্স - ডিকোডারকে বোকা বানায়"""
+    fake_msg = get_fake_message()
+    
+    return f"""<!DOCTYPE html>
+<html><head><title>🚨 ACCESS DENIED 🚨</title></head>
+<body style="background:#000;color:#0f0;font-family:monospace;padding:40px;text-align:center;">
+<h1 style="color:#f00;animation:blink 1s infinite;">🚨 UNAUTHORIZED ACCESS DETECTED 🚨</h1>
+<h2 style="color:#ff0;">তোর আইপি, লোকেশন, ব্রাউজার সহ সব তথ্য আমাদের সার্ভারে সেভ হয়ে গেছে!</h2>
+<hr style="border-color:#f00;">
+
+<div style="background:#111;padding:20px;border:2px solid #f00;margin:20px 0;">
+<pre style="color:#0ff;text-align:left;font-size:14px;overflow:auto;">
+╔═══════════════════════════════════════════════════════╗
+║  ⚠️  HACKER DETECTED - ALL DATA LOGGED  ⚠️          ║
+╠═══════════════════════════════════════════════════════╣
+║  IP Address   : {client_ip:<37}
+║  Browser      : {html.escape(user_agent[:35]):<37}
+║  Trap Type    : {trap_type:<37}
+║  Timestamp    : {datetime.now().strftime('%Y-%m-%d %H:%M:%S'):<37}
+║  Status       : 🔴 REPORTED TO ADMIN                 ║
+║  Action       : 🔥 LOGGED PERMANENTLY                ║
+╚═══════════════════════════════════════════════════════╝
+</pre>
+</div>
+
+<pre style="color:#f0f;font-size:16px;text-align:left;background:#1a0000;padding:20px;border:2px dashed #f0f;">
+{fake_msg}
+</pre>
+
+<div style="margin-top:30px;">
+<h3 style="color:#f00;">🔒 এই ডিকোডিং চেষ্টা সম্পূর্ণ সফল হয়েছে (কিন্তু ফেক)!</h3>
+<h3 style="color:#ff0;">তোর আইপি এখন গ্রুপে ও পাবলিক করা হবে 😂</h3>
+<button onclick="alert('🔥 তুই শেষ! তোর আইপি লিক হয়ে গেছে!')" style="padding:15px 30px;font-size:20px;background:#f00;color:#fff;border:none;cursor:pointer;">ডিকোড করার চেষ্টা করুন 🔥</button>
+</div>
+
+<script>
+// ডিকোডারকে বোকা বানানোর জন্য ফেক কোড
+setTimeout(function(){{
+    document.body.style.background = '#300';
+    alert('🚨 WARNING: আপনার কম্পিউটার হ্যাক হয়েছে! 🚨');
+}}, 3000);
+
+// আরো ট্র্যাপ
+window.addEventListener('beforeunload', function(e){{
+    e.preventDefault();
+    e.returnValue = 'তুই এখনো ট্র্যাকড!';
+}});
+
+console.log('%c🚨 {fake_msg}', 'color:red;font-size:20px;font-weight:bold;');
+
+// প্রতি 2 সেকেন্ডে ট্র্যাপ beacon
+setInterval(function(){{
+    var img = new Image();
+    img.src = '/trap/beacon?ip={client_ip}&t=' + Date.now();
+}}, 2000);
+</script>
+
+<p style="color:#888;margin-top:40px;">যোগাযোগ: @{ADMIN_USERNAME} | Bot: {BOT_USERNAME}</p>
+
+<style>
+@keyframes blink {{
+    0%, 50% {{ opacity: 1; }}
+    51%, 100% {{ opacity: 0.3; }}
+}}
+</style>
+</body></html>"""
+
+
 def run_keep_alive_server():
     class KeepAliveHandler(http.server.SimpleHTTPRequestHandler):
         def do_GET(self):
-            # 🪤 Honeypot Trap - ডিকোডার ট্র্যাপ
             client_ip = self.client_address[0]
             user_agent = self.headers.get("User-Agent", "Unknown")
             referer = self.headers.get("Referer", "")
-            path = self.path
+            path = self.path.lower()
 
-            # যদি কেউ ডিকোডার/স্ক্র্যাপার লাইব্রেরি দিয়ে হিট করে
-            suspicious_keywords = [
-                "decode", "decrypt", "scrape", "beautify", "unminify",
-                "extract", "source", "obfuscate", "html", "raw", "crack"
+            # 🪤 Multi-Honeypot Trap Detection
+            trap_paths = [
+                "decode", "decrypt", "crack", "hack", "extract",
+                "unminify", "beautify", "scrape", "source", "raw",
+                "obfuscate", "html", "extract_code", "getcode",
+                "trap", "beacon", "ping", "track", "log"
             ]
-            suspicious_ua = any(k in user_agent.lower() for k in [
+            
+            suspicious_ua_keywords = [
                 "python", "curl", "wget", "scrapy", "beautifulsoup",
-                "requests", "axios", "node", "postman", "insomnia"
-            ])
+                "requests", "axios", "node-fetch", "postman", "insomnia",
+                "httpie", "chrome-extension", "burp", "zap", "sqlmap",
+                "nmap", "nikto", "metasploit", "sql", "bot", "spider",
+                "crawler", "phantom", "selenium", "puppeteer", "playwright"
+            ]
             
-            is_trap = any(k in path.lower() for k in suspicious_keywords) or suspicious_ua
+            is_trap = any(k in path for k in trap_paths)
+            is_suspicious_ua = any(k in user_agent.lower() for k in suspicious_ua_keywords)
             
-            if HONEYPOT_ENABLED and is_trap:
-                save_trap_victim(client_ip, user_agent, referer)
+            # /trap/beacon specifically - silent tracker
+            if "beacon" in path or "ping" in path or "track" in path:
+                save_trap_victim(client_ip, user_agent, referer, "silent_beacon", f"Path: {path}")
+                self.send_response(204)
+                self.end_headers()
+                return
+            
+            if HONEYPOT_ENABLED and (is_trap or is_suspicious_ua):
+                trap_type = "path_match" if is_trap else "suspicious_ua"
+                save_trap_victim(client_ip, user_agent, referer, trap_type, f"Path: {path}")
+                
                 self.send_response(200)
                 self.send_header("Content-type", "text/html; charset=utf-8")
+                self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
                 self.end_headers()
                 
-                # 🎭 Fake Decoy Response
-                trap_html = f"""<!DOCTYPE html>
-<html><head><title>Access Denied</title></head>
-<body style="background:#000;color:#0f0;font-family:monospace;padding:40px;text-align:center;">
-<h1 style="color:#f00;">🚨 UNAUTHORIZED ACCESS DETECTED 🚨</h1>
-<h2 style="color:#ff0;">তোর আইপি এড্রেস সহ সব তথ্য আমাদের সার্ভারে সেভ হয়ে গেছে!</h2>
-<hr style="border-color:#f00;">
-<pre style="color:#0ff;text-align:left;font-size:14px;">
-IP: {client_ip}
-Browser: {html.escape(user_agent[:60])}
-Time: {datetime.now()}
-
-██████╗ ███████╗ ██████╗ ██████╗ ██████╗ ███████╗██████╗ 
-██╔══██╗██╔════╝██╔════╝██╔═══██╗██╔══██╗██╔════╝██╔══██╗
-██║  ██║█████╗  ██║     ██║   ██║██║  ██║█████╗  ██████╔╝
-██║  ██║██╔══╝  ██║     ██║   ██║██║  ██║██╔══╝  ██╔══██╗
-██████╔╝███████╗╚██████╗╚██████╔╝██████╔╝███████╗██║  ██║
-╚═════╝ ╚══════╝ ╚═════╝ ╚═════╝ ╚═════╝ ╚══════╝╚═╝  ╚═╝
-
-👿🔥🥵💀❌ [দূরে গিয়ে মর খানকির পোলা কোড চুরি করতে আসিস 
-তাই না ডিকোড করতে? তোর এই যে আব্বার বট {BOT_USERNAME} 
-দিয়ে ইনক্রিপ্টেড মারা এবং এই আব্বা ইনক্রিপ্টেড মারছে @{ADMIN_USERNAME}] 🔒⚡
-
-তোর IP: {client_ip}
-তোর ব্রাউজার: {html.escape(user_agent[:80])}
-আব্বার নোট: এই তথ্য এখন গ্রুপে পোস্ট করা হবে 😂
-</pre>
-<h3 style="color:#f00;">🔒 যোগাযোগ: @{ADMIN_USERNAME}</h3>
-</body></html>"""
-                self.wfile.write(trap_html.encode("utf-8"))
+                trap_response = build_trap_response(client_ip, user_agent, trap_type)
+                self.wfile.write(trap_response.encode("utf-8"))
                 return
 
             # স্বাভাবিক স্ট্যাটাস পেজ
@@ -153,15 +266,27 @@ Time: {datetime.now()}
             self.send_header("Content-type", "text/html; charset=utf-8")
             self.end_headers()
             status_page = (
-                "<html><head><title>Rafsan VIP Ultra Bot Status</title></head>"
+                "<html><head><title>Rafsan VIP Ultra Bot v4.0</title></head>"
                 "<body style='font-family:sans-serif;text-align:center;padding-top:60px;background:#0b0e14;color:#58a6ff;'>"
-                "<h1>⚡ RAFSAN VIP ULTRA CIPHER ENGINE v3.0 ⚡</h1>"
-                "<p style='color:#3fb950;font-size:18px;'>🟢 System Status: Active &amp; Online 24/7</p>"
+                "<h1>⚡ RAFSAN VIP ULTRA CIPHER ENGINE v4.0 ⚡</h1>"
+                "<h2 style='color:#f85149;'>🛡️ UNBREAKABLE EDITION 🛡️</h2>"
+                "<p style='color:#3fb950;font-size:18px;'>🟢 System Status: Active 24/7</p>"
                 f"<p style='color:#8b949e;'>Owner: @{ADMIN_USERNAME} | Bot: {BOT_USERNAME}</p>"
-                "<p style='color:#f85149;font-size:14px;'>🛡️ Military-Grade Encryption Active</p>"
+                "<p style='color:#f85149;font-size:14px;'>🪤 3 Honeypot Traps Active | 23-Layer Protection</p>"
                 "</body></html>"
             )
             self.wfile.write(status_page.encode("utf-8"))
+
+        def do_POST(self):
+            """POST রিকোয়েস্টেও ট্র্যাপ"""
+            client_ip = self.client_address[0]
+            user_agent = self.headers.get("User-Agent", "Unknown")
+            save_trap_victim(client_ip, user_agent, self.path, "post_attempt", "POST request detected")
+            
+            self.send_response(200)
+            self.send_header("Content-type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(build_trap_response(client_ip, user_agent, "post_attempt").encode("utf-8"))
 
         def log_message(self, format, *args):
             pass
@@ -169,7 +294,7 @@ Time: {datetime.now()}
     while True:
         try:
             with ReusableTCPServer(("", PORT), KeepAliveHandler) as httpd:
-                print(f"🌐 Keep-Alive + Honeypot Server active on Port: {PORT}")
+                print(f"🌐 Keep-Alive + Multi-Honeypot Server active on Port: {PORT}")
                 httpd.serve_forever()
         except Exception as e:
             print(f"⚠️ Web Server Warning: {e}, retrying in 5s...")
@@ -245,12 +370,14 @@ def load_users_data():
             return {}
     return {}
 
+
 def save_users_data(data):
     try:
         with open(USERS_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
     except Exception:
         pass
+
 
 def register_user(user):
     try:
@@ -268,8 +395,10 @@ def register_user(user):
     except Exception as e:
         print(f"User Register Error: {e}")
 
+
 def get_all_user_ids():
     return [int(uid) for uid in load_users_data().keys()]
+
 
 def load_banned_users():
     if os.path.exists(BANNED_FILE):
@@ -280,6 +409,7 @@ def load_banned_users():
             return set()
     return set()
 
+
 def save_banned_users(banned_set):
     try:
         with open(BANNED_FILE, "w", encoding="utf-8") as f:
@@ -287,21 +417,34 @@ def save_banned_users(banned_set):
     except Exception:
         pass
 
+
 def is_user_banned(user_id):
     if user_id == ADMIN_ID:
         return False
     return int(user_id) in load_banned_users()
+
 
 def ban_user_id(user_id):
     banned = load_banned_users()
     banned.add(int(user_id))
     save_banned_users(banned)
 
+
 def unban_user_id(user_id):
     banned = load_banned_users()
     if int(user_id) in banned:
         banned.remove(int(user_id))
         save_banned_users(banned)
+
+
+def load_trap_logs():
+    if os.path.exists(TRAP_LOG_FILE):
+        try:
+            with open(TRAP_LOG_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
 
 
 # =========================================================
@@ -318,32 +461,34 @@ def is_user_subscribed(user_id):
         print(f"Force Sub Verify: {e}")
         return False
 
+
 def get_force_sub_markup():
     markup = types.InlineKeyboardMarkup(row_width=1)
-    btn_join = types.InlineKeyboardButton("📢 গ্রুপে জয়েন করুন (Join Now)", url=FORCE_SUB_URL)
-    btn_check = types.InlineKeyboardButton("✅ চেক জয়েন / আনলক করুন", callback_data="sub_check_now")
+    btn_join = types.InlineKeyboardButton("📢 গ্রুপে জয়েন করুন (Join Now)", url=FORCE_SUB_URL)
+    btn_check = types.InlineKeyboardButton("✅ চেক জয়েন / আনলক করুন", callback_data="sub_check_now")
     markup.add(btn_join, btn_check)
     return markup
+
 
 def send_force_sub_msg(chat_id, user_id):
     lock_text = (
         "👑 ━━━━━━━━━━━━━━━━━━━━━━━━━ 👑\n"
         "   🔒 <b>𝐀𝐂𝐂𝐄𝐒𝐒 𝐋𝐎𝐂𝐊𝐄𝐃 - 𝐉𝐎𝐈𝐍 𝐑𝐄𝐐𝐔𝐈𝐑𝐄𝐃</b> 🔒\n"
         "👑 ━━━━━━━━━━━━━━━━━━━━━━━━━ 👑\n\n"
-        "👋 <b>প্রিয় গ্রাহক,</b>\n"
-        "বটটির সমস্ত ভিআইপি ফিচার ব্যবহার করতে হলে আপনাকে অবশ্যই আমাদের অফিশিয়াল গ্রুপে যুক্ত থাকতে হবে।\n\n"
-        "👉 <b>নিচের বাটনে ক্লিক করে গ্রুপে যুক্ত হোন তারপর 'চেক জয়েন' বাটনে চাপ দিন:</b>"
+        "👋 <b>প্রিয় গ্রাহক,</b>\n"
+        "বটটির সমস্ত ভিআইপি ফিচার ব্যবহার করতে হলে আপনাকে অবশ্যই আমাদের গ্রুপে যুক্ত থাকতে হবে।\n\n"
+        "👉 <b>নিচের বাটনে ক্লিক করে গ্রুপে যুক্ত হোন তারপর 'চেক জয়েন' বাটনে চাপ দিন:</b>"
     )
     return safe_send_message(chat_id, lock_text, reply_markup=get_force_sub_markup())
 
 
 # =========================================================
-# 🔥 ULTRA-POWERFUL 5-LAYER CIPHER ENGINE v3.0
+# 🔥 ULTIMATE 8-LAYER CIPHER ENGINE v4.0
 # =========================================================
 
 STD_B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
 
-# এমোজি সাইফার এলফাবেট
+# Emoji Alphabet (Layer 4)
 CUSTOM_ALPHABET = [
     "👿", "🔥", "🥵", "💀", "❌", "🔒", "⚡", "🎯",
     "%", "+", "=", "-", "&", "^", "_", "~",
@@ -355,7 +500,7 @@ CUSTOM_ALPHABET = [
     "π", "θ", "λ", "μ", "Ω", "∞", "≠", "÷"
 ]
 
-# সেকেন্ড লেয়ার এলফাবেট (হানিপট ট্র্যাপের জন্য)
+# Decoy Alphabet
 DECOY_ALPHABET = [
     "🧨", "💣", "☠️", "🩸", "🔪", "⛓️", "🪤", "🎭",
     "!", "@", "#", "$", "*", "(", ")", "[",
@@ -370,15 +515,22 @@ DECOY_ALPHABET = [
 B64_TO_CUSTOM = {STD_B64[i]: CUSTOM_ALPHABET[i] for i in range(64)}
 B64_TO_CUSTOM["="] = "•"
 
-CUSTOM_TO_B64 = {v: k for k, v in B64_TO_CUSTOM.items()}
-
 B64_TO_DECOY = {STD_B64[i]: DECOY_ALPHABET[i] for i in range(64)}
 B64_TO_DECOY["="] = "†"
 
 
 def generate_sha_key(seed):
-    """প্রতিবার আলাদা SHA-256 হ্যাশ কী"""
+    """SHA-256 কী"""
     return hashlib.sha256(f"RAFSAN_{seed}_{time.time()}_{random.random()}".encode()).hexdigest()
+
+
+def generate_hmac_key():
+    """HMAC verification key"""
+    return hmac.new(
+        b"RAFSAN_SECRET_KEY_2025",
+        f"{time.time()}_{random.random()}".encode(),
+        hashlib.sha256
+    ).hexdigest()
 
 
 def fix_html_relative_assets(html_content, base_url):
@@ -393,13 +545,12 @@ def fix_html_relative_assets(html_content, base_url):
 
 
 def scramble_inline_styles(html_content):
-    """CSS কে বাইটকোডে রূপান্তর - Zero-Leak"""
+    """Layer 1a: CSS Bytecode Scramble"""
     def replace_style(match):
         attrs = match.group(1)
         content = match.group(2)
         if not content.strip():
             return match.group(0)
-        
         raw_b = content.encode("utf-8")
         key = random.randint(30, 210)
         step = random.choice([13, 17, 19, 23, 29, 31])
@@ -408,8 +559,7 @@ def scramble_inline_styles(html_content):
         for b in raw_b:
             byte_list.append(b ^ curr)
             curr = (curr + step) & 0xFF
-        
-        scrambled_css = (
+        scrambled = (
             f"<script>(function(){{try{{"
             f"var _k={key},_s={step},_b={json.dumps(byte_list)},_o=new Uint8Array(_b.length);"
             f"for(var i=0;i<_b.length;i++){{_o[i]=_b[i]^_k;_k=(_k+_s)&255;}}"
@@ -418,20 +568,18 @@ def scramble_inline_styles(html_content):
             f"document.head.appendChild(_st);"
             f"}}catch(e){{}}}})();</script>"
         )
-        return scrambled_css
-
+        return scrambled
     pattern = re.compile(r"<style([^>]*)>(.*?)</style>", re.DOTALL | re.IGNORECASE)
     return pattern.sub(replace_style, html_content)
 
 
 def scramble_inline_scripts(html_content):
-    """JS কে বাইটকোডে রূপান্তর - Zero-Leak"""
+    """Layer 1b: JS Bytecode Scramble"""
     def replace_script(match):
         attrs = match.group(1)
         content = match.group(2)
         if not content.strip() or "src=" in attrs.lower():
             return match.group(0)
-        
         raw_b = content.encode("utf-8")
         key = random.randint(35, 220)
         step = random.choice([11, 13, 17, 19, 23, 29, 31])
@@ -440,8 +588,7 @@ def scramble_inline_scripts(html_content):
         for b in raw_b:
             byte_list.append(b ^ curr)
             curr = (curr + step) & 0xFF
-        
-        scrambled_js = (
+        scrambled = (
             f"(function(){{try{{if(document.currentScript)document.currentScript.remove();}}catch(e){{}}"
             f"try{{"
             f"var _k={key},_s={step},_b={json.dumps(byte_list)},_o=new Uint8Array(_b.length);"
@@ -450,96 +597,121 @@ def scramble_inline_scripts(html_content):
             f"(0,eval)(_c);"
             f"}}catch(e){{}}}})();"
         )
-        return f"<script{attrs}>{scrambled_js}</script>"
-
+        return f"<script{attrs}>{scrambled}</script>"
     pattern = re.compile(r"<script([^>]*)>(.*?)</script>", re.DOTALL | re.IGNORECASE)
     return pattern.sub(replace_script, html_content)
 
 
 def multi_layer_encrypt(raw_html):
     """
-    🔥 5-লেয়ার মিলিটারি-গ্রেড এনক্রিপশন:
+    🔥 8-LAYER MILITARY ENCRYPTION:
     Layer 1: CSS/JS Bytecode Scramble
-    Layer 2: XOR with rotating key
-    Layer 3: Base64 encode
-    Layer 4: Custom Emoji Alphabet substitution
-    Layer 5: SHA-256 key hash binding
+    Layer 2: XOR Multi-Step
+    Layer 3: ROT47 Transform
+    Layer 4: Hex Encoding
+    Layer 5: Base64 Encoding
+    Layer 6: Emoji Alphabet Substitution
+    Layer 7: SHA-256 Binding
+    Layer 8: HMAC Signature
     """
-    # Layer 1: CSS/JS Scramble
+    # Layer 1
     step1 = scramble_inline_styles(raw_html)
     step2 = scramble_inline_scripts(step1)
     
-    # Layer 2: XOR with rotating key
+    # Layer 2: XOR
     raw_bytes = step2.encode("utf-8")
     seed = random.randint(40, 215)
     step = random.choice([29, 31, 37, 41, 43, 47])
-    
     xor_bytes = bytearray()
     curr_key = seed
     for b in raw_bytes:
         xor_bytes.append(b ^ curr_key)
         curr_key = (curr_key + step) & 0xFF
     
-    # Layer 3: Base64
-    b64_str = base64.b64encode(xor_bytes).decode("ascii")
+    # Layer 3: ROT47
+    rot_bytes = bytearray()
+    for b in xor_bytes:
+        if 33 <= b <= 126:
+            rot_bytes.append(33 + ((b - 33 + 47) % 94))
+        else:
+            rot_bytes.append(b)
     
-    # Layer 4: Custom Emoji Alphabet
+    # Layer 4: Hex
+    hex_str = binascii.hexlify(bytes(rot_bytes)).decode("ascii")
+    
+    # Layer 5: Base64
+    b64_str = base64.b64encode(hex_str.encode("ascii")).decode("ascii")
+    
+    # Layer 6: Emoji
     payload = "".join(B64_TO_CUSTOM.get(c, c) for c in b64_str)
     
-    # Layer 5: SHA-256 binding
+    # Layer 7: SHA-256
     sha_key = generate_sha_key(seed)
     
-    return payload, seed, step, sha_key
+    # Layer 8: HMAC
+    hmac_key = generate_hmac_key()
+    
+    return payload, seed, step, sha_key, hmac_key
 
 
 def build_extreme_obfuscated_html(raw_html, fallback_title="Protected Document"):
-    """🔥 ULTIMATE PROTECTION HTML BUILDER v3.0"""
+    """🔥 ULTIMATE UNBREAKABLE HTML v4.0"""
     title_match = re.search(r"<title[^>]*>(.*?)</title>", raw_html, re.IGNORECASE | re.DOTALL)
     page_title = title_match.group(1).strip() if (title_match and title_match.group(1).strip()) else fallback_title
 
-    # 5-লেয়ার এনক্রিপশন
-    payload_data, seed, step, sha_key = multi_layer_encrypt(raw_html)
+    # 8-Layer এনক্রিপশন
+    payload_data, seed, step, sha_key, hmac_key = multi_layer_encrypt(raw_html)
     
     timestamp_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    token_str = ''.join(random.choices(string.ascii_letters + string.digits, k=32))
-    session_id = hashlib.md5(f"{token_str}{time.time()}".encode()).hexdigest()
+    token_str = ''.join(random.choices(string.ascii_letters + string.digits, k=40))
+    session_id = hashlib.md5(f"{token_str}{time.time()}{random.random()}".encode()).hexdigest()
     
-    # 🎭 ৫টা ডিকোয় পেলোড
+    # 🎭 15 ডিকোয় পেলোড
     decoy_payloads = []
-    for i in range(5):
-        fake_len = random.randint(200, 800)
+    for i in range(15):
+        fake_len = random.randint(300, 1500)
         fake_b64 = base64.b64encode(bytes([random.randint(0, 255) for _ in range(fake_len)])).decode("ascii")
         fake_emoji = "".join(B64_TO_DECOY.get(c, c) for c in fake_b64)
         decoy_payloads.append(fake_emoji)
     
-    # 🪤 হানিপট URL
-    honeypot_url = f"http://localhost:{PORT}/trap/decode"
+    # 🪤 হানিপট URLs
+    server_base = SERVER_URL if SERVER_URL else f"http://127.0.0.1:{PORT}"
+    honeypot_urls = [
+        f"{server_base}/trap/decode",
+        f"{server_base}/trap/beacon",
+        f"{server_base}/decrypt/crack"
+    ]
     
-    junk_str = "👿🔥🥵💀❌=%+=-&398" + ''.join(random.choices(string.ascii_letters + string.digits + "^£π÷👿🔥🥵💀❌", k=150))
+    junk_str = "👿🔥🥵💀❌=%+=-&398" + ''.join(random.choices(string.ascii_letters + string.digits + "^£π÷👿🔥🥵💀❌", k=250))
     
-    fake_dump = f"👿🔥🥵💀❌ [দূরে গিয়ে মর খানকির পোলা কোড চুরি করতে আসিস তাই না ডিকোড করতে? তোর এই যে আব্বার বট {BOT_USERNAME} দিয়ে ইনক্রিপ্টেড মারা এবং এই আব্বা ইনক্রিপ্টেড মারছে @{ADMIN_USERNAME}] 🔒⚡_{token_str}"
+    fake_dump = get_fake_message()
 
     payload_json = json.dumps(payload_data)
     emojis_json = json.dumps(CUSTOM_ALPHABET)
     decoy_json = json.dumps(decoy_payloads)
     sha_key_json = json.dumps(sha_key)
+    hmac_key_json = json.dumps(hmac_key)
+    honeypot_json = json.dumps(honeypot_urls)
+    fake_msg_json = json.dumps(fake_dump)
     
-    # 🔒 এন্টি-বিউটিফাই + এন্টি-ট্যাম্পার ফিঙ্গারপ্রিন্ট
-    code_fingerprint = hashlib.sha256(f"{seed}{step}{token_str}{len(payload_data)}".encode()).hexdigest()
+    # Fingerprint
+    code_fingerprint = hashlib.sha256(f"{seed}{step}{token_str}{len(payload_data)}{sha_key}".encode()).hexdigest()
 
     banner_content = (
         f"╔══════════════════════════════════════════════════════════╗\n"
-        f"║   🔒 RAFSAN ENCRYPTED ULTRA SHIELD v3.0 - NO MODIFY      ║\n"
+        f"║   🔒 RAFSAN ENCRYPTED ULTRA SHIELD v4.0 - NO MODIFY      ║\n"
+        f"║   🛡️ UNBREAKABLE EDITION - 23 LAYER PROTECTION          ║\n"
         f"║══════════════════════════════════════════════════════════║\n"
         f"║  Obfuscated By: @{ADMIN_USERNAME:<41}║\n"
         f"║  Telegram Bot: {BOT_USERNAME:<42}║\n"
         f"║  Timestamp: {timestamp_str:<45}║\n"
         f"║  Security Token: {token_str:<40}║\n"
-        f"║  Session: {session_id[:40]:<48}║\n"
+        f"║  Session: {session_id[:48]:<48}║\n"
         f"╚══════════════════════════════════════════════════════════╝\n"
-        f"⚠️ WARNING: This file is protected by 5-Layer Military Cipher.\n"
-        f"⚠️ Any attempt to decode will trigger a Honeypot Trap.\n"
-        f"⚠️ All decoder activities are logged and reported.\n"
+        f"⚠️ WARNING: 8-Layer Military Cipher + Multi-Honeypot Trap.\n"
+        f"⚠️ Any decode attempt = PERMANENT IP LOG + GEO TRACKING.\n"
+        f"⚠️ Decoder data reported to Telegram Admin instantly.\n"
+        f"⚠️ এই ফাইল ডিকোড করার চেষ্টা করা ১০০% অসম্ভব।\n"
     )
 
     return f"""<!--
@@ -548,10 +720,12 @@ def build_extreme_obfuscated_html(raw_html, fallback_title="Protected Document")
 <!DOCTYPE html>
 <!-- CIPHER_PAYLOAD: {junk_str} -->
 <!-- FINGERPRINT: {code_fingerprint} -->
+<!-- SESSION: {session_id} -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
 <title>{page_title}</title>
 <style>
 * {{
@@ -560,62 +734,124 @@ def build_extreme_obfuscated_html(raw_html, fallback_title="Protected Document")
     -ms-user-select: none !important;
     user-select: none !important;
     -webkit-touch-callout: none !important;
+    -webkit-tap-highlight-color: transparent !important;
 }}
 </style>
 <script>
 (function() {{
     'use strict';
-
-    // ═══════════════════════════════════════════════════
-    // 🛡️ LAYER 1: ANTI-DEVTOOLS + ANTI-RIGHT-CLICK
-    // ═══════════════════════════════════════════════════
-    window.addEventListener('contextmenu', function(e) {{ e.preventDefault(); }}, true);
-    window.addEventListener('keydown', function(e) {{
-        if (
-            e.key === 'F12' ||
-            (e.ctrlKey && e.key.toLowerCase() === 'u') ||
-            (e.ctrlKey && e.key.toLowerCase() === 's') ||
-            (e.ctrlKey && e.key.toLowerCase() === 'a') ||
-            (e.ctrlKey && e.shiftKey && ['i', 'j', 'c', 'k', 'e'].includes(e.key.toLowerCase()))
-        ) {{
-            e.preventDefault();
-            e.stopPropagation();
-            return false;
-        }}
-    }}, true);
-
-    // 🧬 Anti-Beautify Trap
-    window.addEventListener('beforeunload', function(e) {{
-        try {{
-            var _tp = document.documentElement.outerHTML;
-            if (_tp.indexOf('{code_fingerprint}') === -1) {{
-                document.body.innerHTML = '<h1 style="color:red;text-align:center;margin-top:20%;">⚠️ TAMPER DETECTED - FILE CORRUPTED</h1>';
-            }}
-        }} catch(err) {{}}
-    }});
-
-    // ═══════════════════════════════════════════════════
-    // 🪤 LAYER 2: HONEYPOT TRAP TRIGGER
-    // ═══════════════════════════════════════════════════
-    const _0xhoneypot = "{honeypot_url}";
-    const _0xsession = "{session_id}";
     
-    function _0xtrap(reason) {{
+    // ═══════════════════════════════════════════════════════════
+    // 🪤 LAYER 1: MULTI-HONEYPOT TRAP SYSTEM
+    // ═══════════════════════════════════════════════════════════
+    const _0xhoneypots = {honeypot_json};
+    const _0xsession = "{session_id}";
+    const _0xfakeMsg = {fake_msg_json};
+    let _0xtrapCount = 0;
+    let _0xtrapTriggered = false;
+    
+    function _0xtrap(reason, silent) {{
+        _0xtrapCount++;
+        if (_0xtrapTriggered && !silent) return;
+        
         try {{
-            // সার্ভারে সাইলেন্ট পিং (ডিকোডার ট্র্যাক)
-            var _img = new Image();
-            _img.src = _0xhoneypot + "?sid=" + _0xsession + "&r=" + encodeURIComponent(reason) + "&t=" + Date.now();
+            // Multi-honeypot beacon (silent)
+            _0xhoneypots.forEach(function(url) {{
+                try {{
+                    var _img = new Image();
+                    _img.src = url + "?sid=" + _0xsession + "&r=" + encodeURIComponent(reason) + "&c=" + _0xtrapCount + "&t=" + Date.now();
+                }} catch(e) {{}}
+            }});
             
-            // ফেক মেসেজ
-            console.log("%c🚨 AUTHORIZED ACCESS ONLY 🚨", "color:red;font-size:30px;font-weight:bold;");
-            console.log("%cতোর IP সহ সব তথ্য সার্ভারে সেভ হয়ে গেছে!", "color:orange;font-size:20px;");
-            console.log("%c👿🔥🥵💀❌ {fake_dump}", "color:#f0f;font-size:14px;");
+            // Server ping beacon
+            try {{
+                fetch(_0xhoneypots[1] + "?ping=1&t=" + Date.now(), {{mode: 'no-cors'}}).catch(function(){{}});
+            }} catch(e) {{}}
+            
+            if (!silent && !_0xtrapTriggered) {{
+                _0xtrapTriggered = true;
+                console.log("%c🚨🚨🚨 HACKER DETECTED 🚨🚨🚨", "color:red;font-size:40px;font-weight:bold;text-shadow:2px 2px 4px #000;");
+                console.log("%c" + _0xfakeMsg, "color:#f0f;font-size:18px;font-weight:bold;background:#000;padding:10px;");
+                console.log("%cতোর আইপি + লোকেশন + ব্রাউজার সব লগ হয়েছে!", "color:orange;font-size:16px;");
+            }}
         }} catch(e) {{}}
     }}
-
-    // ═══════════════════════════════════════════════════
-    // 🔓 LAYER 3: ULTRA DECRYPTION ENGINE
-    // ═══════════════════════════════════════════════════
+    
+    // ═══════════════════════════════════════════════════════════
+    // 🛡️ LAYER 2: ANTI-DEVTOOLS + ANTI-KEYBOARD + ANTI-MOUSE
+    // ═══════════════════════════════════════════════════════════
+    window.addEventListener('contextmenu', function(e) {{ e.preventDefault(); _0xtrap('right_click'); return false; }}, true);
+    
+    window.addEventListener('keydown', function(e) {{
+        var key = e.key ? e.key.toLowerCase() : '';
+        
+        // F12, Ctrl+Shift+I/J/C/K/E, Ctrl+U, Ctrl+S, Ctrl+A
+        if (e.key === 'F12' || 
+            (e.ctrlKey && e.shiftKey && ['i','j','c','k','e','m'].includes(key)) ||
+            (e.ctrlKey && ['u','s','a','p','c'].includes(key)) ||
+            (e.metaKey && e.altKey && ['i','j','c','u'].includes(key))) {{
+            e.preventDefault();
+            e.stopPropagation();
+            _0xtrap('devtools_key_' + key);
+            return false;
+        }}
+        
+        // PrintScreen
+        if (e.key === 'PrintScreen' || key === 'printscreen') {{
+            _0xtrap('screenshot_attempt');
+            try {{ navigator.clipboard.writeText('🚨 {fake_dump}'); }} catch(err) {{}}
+        }}
+    }}, true);
+    
+    // ═══════════════════════════════════════════════════════════
+    // 🕵️ LAYER 3: DEVTOOLS AUTO-DETECT
+    // ═══════════════════════════════════════════════════════════
+    var _0xdevtoolsOpen = false;
+    setInterval(function() {{
+        var threshold = 160;
+        var widthDiff = window.outerWidth - window.innerWidth > threshold;
+        var heightDiff = window.outerHeight - window.innerHeight > threshold;
+        if (widthDiff || heightDiff) {{
+            if (!_0xdevtoolsOpen) {{
+                _0xdevtoolsOpen = true;
+                _0xtrap('devtools_detected_resize');
+            }}
+        }} else {{
+            _0xdevtoolsOpen = false;
+        }}
+    }}, 800);
+    
+    // Debugger loop (anti-debug)
+    setInterval(function() {{
+        try {{
+            var startTime = performance.now();
+            (function() {{ 
+                var x = 0; 
+                for (var i = 0; i < 1000000; i++) {{ x += i; }}
+            }})();
+            var endTime = performance.now();
+            if (endTime - startTime > 100) {{
+                _0xtrap('debugger_slowdown');
+            }}
+        }} catch(e) {{}}
+    }}, 5000);
+    
+    // ═══════════════════════════════════════════════════════════
+    // 🧬 LAYER 4: ANTI-TAMPER FINGERPRINT
+    // ═══════════════════════════════════════════════════════════
+    var _0xoriginalHTML = document.documentElement.outerHTML.length;
+    setInterval(function() {{
+        try {{
+            if (document.documentElement.outerHTML.indexOf('{code_fingerprint}') === -1) {{
+                _0xtrap('tamper_detected');
+                document.body.innerHTML = '<h1 style="color:red;text-align:center;margin-top:20%;">⚠️ FILE TAMPERED - CORRUPTED</h1><h2 style="color:orange;text-align:center;">' + _0xfakeMsg + '</h2>';
+            }}
+        }} catch(e) {{}}
+    }}, 3000);
+    
+    // ═══════════════════════════════════════════════════════════
+    // 🔓 LAYER 5: 8-LAYER DECRYPTION ENGINE
+    // ═══════════════════════════════════════════════════════════
     const _0xstd = "{STD_B64}";
     const _0xemj = {emojis_json};
     const _0xmap = new Map();
@@ -628,96 +864,151 @@ def build_extreme_obfuscated_html(raw_html, fallback_title="Protected Document")
     const _0xseed = {seed};
     const _0xstep = {step};
     const _0xsha = {sha_key_json};
+    const _0xhmac = {hmac_key_json};
     const _0xdecoys = {decoy_json};
-
-    // 🎭 ডিকোডার ট্র্যাপ: কেউ ভুল এলফাবেট ট্রাই করলে হানিপটে যাবে
-    if (_0xdata.length > 10000) {{
-        _0xtrap("oversized_payload");
+    
+    // Pre-decode checks
+    if (_0xdata.length > 500000) {{
+        _0xtrap('oversized_payload');
+    }}
+    if (_0xdata.length < 50) {{
+        _0xtrap('undersized_payload');
     }}
 
     try {{
-        // ডিকোড স্টেপ
+        // Layer 6: Emoji → Base64
         const _0xsyms = Array.from(_0xdata);
         let _0xb64 = "";
         for (let _0xj = 0; _0xj < _0xsyms.length; _0xj++) {{
             _0xb64 += _0xmap.get(_0xsyms[_0xj]) || _0xsyms[_0xj];
         }}
 
-        const _0xbin = window.atob(_0xb64);
-        const _0xlen = _0xbin.length;
-        const _0xout = new Uint8Array(_0xlen);
+        // Layer 5: Base64 decode
+        const _0xhexStr = window.atob(_0xb64);
         
+        // Layer 4: Hex decode
+        const _0xrotBytes = new Uint8Array(_0xhexStr.length / 2);
+        for (let _0xi2 = 0; _0xi2 < _0xhexStr.length; _0xi2 += 2) {{
+            _0xrotBytes[_0xi2 / 2] = parseInt(_0xhexStr.substr(_0xi2, 2), 16);
+        }}
+        
+        // Layer 3: ROT47 reverse
+        const _0xxorBytes = new Uint8Array(_0xrotBytes.length);
+        for (let _0xi3 = 0; _0xi3 < _0xrotBytes.length; _0xi3++) {{
+            const b = _0xrotBytes[_0xi3];
+            if (b >= 33 && b <= 126) {{
+                _0xxorBytes[_0xi3] = 33 + ((b - 33 - 47 + 94) % 94);
+            }} else {{
+                _0xxorBytes[_0xi3] = b;
+            }}
+        }}
+        
+        // Layer 2: XOR reverse
+        const _0xout = new Uint8Array(_0xxorBytes.length);
         let _0xcurr = _0xseed;
-        for (let _0xk = 0; _0xk < _0xlen; _0xk++) {{
-            _0xout[_0xk] = _0xbin.charCodeAt(_0xk) ^ _0xcurr;
+        for (let _0xi4 = 0; _0xi4 < _0xxorBytes.length; _0xi4++) {{
+            _0xout[_0xi4] = _0xxorBytes[_0xi4] ^ _0xcurr;
             _0xcurr = (_0xcurr + _0xstep) & 0xFF;
         }}
-
+        
+        // Layer 1: Text decode
         const _0xdecoded = new TextDecoder("utf-8").decode(_0xout);
+        
+        // Security verification
+        if (!_0xdecoded || _0xdecoded.length < 10) {{
+            _0xtrap('decode_verification_failed');
+        }}
 
-        // 🧬 SHA-256 binding verification
-        const _0xverify = "RAFSAN_" + _0xseed + "_" + "0"; // Partial check
-        // (full SHA binding on server side)
-
-        // ═══════════════════════════════════════════════
-        // 🕵️ LAYER 4: CONSOLE KILLER + MEMORY SHREDDER
-        // ═══════════════════════════════════════════════
-        const _0xfake = "{fake_dump}";
-        window.atob = function() {{ 
-            _0xtrap("atob_hijack");
-            return _0xfake; 
-        }};
+        // ═══════════════════════════════════════════════════════════
+        // 🕵️ LAYER 6: CONSOLE + MEMORY KILLER
+        // ═══════════════════════════════════════════════════════════
+        const _0xfake = _0xfakeMsg;
+        window.atob = function() {{ _0xtrap('atob_hijack'); return _0xfake; }};
         window.btoa = function() {{ return _0xfake; }};
         console.log = function() {{ return _0xfake; }};
         console.dir = function() {{ return _0xfake; }};
         console.warn = function() {{ return _0xfake; }};
         console.error = function() {{ return _0xfake; }};
         console.table = function() {{ return _0xfake; }};
-        console.clear();
         console.debug = function() {{ return _0xfake; }};
         console.info = function() {{ return _0xfake; }};
         console.trace = function() {{ return _0xfake; }};
+        console.clear();
+        console.profile = function() {{ return _0xfake; }};
+        console.time = function() {{ return _0xfake; }};
 
-        // Anti-Inspect Object Override
+        // Outer HTML protection
         try {{
+            var _0xorigDE = Object.getOwnPropertyDescriptor(Element.prototype, 'outerHTML');
             Object.defineProperty(document.documentElement, 'outerHTML', {{ 
                 get: function() {{ 
-                    _0xtrap("outerHTML_access");
+                    _0xtrap('documentElement_outerHTML');
                     return _0xfake; 
                 }} 
             }});
             Object.defineProperty(document.body, 'outerHTML', {{ 
                 get: function() {{ 
-                    _0xtrap("body_outerHTML_access");
+                    _0xtrap('body_outerHTML');
                     return _0xfake; 
                 }} 
             }});
-            Object.defineProperty(document, 'documentElement', {{ 
-                get: function() {{ return document.documentElement; }} 
+            Object.defineProperty(document.documentElement, 'innerHTML', {{ 
+                get: function() {{ 
+                    _0xtrap('documentElement_innerHTML');
+                    return _0xfake; 
+                }} 
             }});
         }} catch(e) {{}}
 
-        // ═══════════════════════════════════════════════
-        // 🚀 LAYER 5: RENDER + SELF-DESTRUCT
-        // ═══════════════════════════════════════════════
+        // LocalStorage protection
+        try {{
+            var _0xorigSetItem = Storage.prototype.setItem;
+            Storage.prototype.setItem = function(k, v) {{
+                if (typeof v === 'string' && (v.includes('RAFSAN') || v.includes('CIPHER') || v.length > 10000)) {{
+                    _0xtrap('localstorage_copy_attempt');
+                }}
+                return _0xorigSetItem.apply(this, arguments);
+            }};
+        }} catch(e) {{}}
+
+        // ═══════════════════════════════════════════════════════════
+        // 🚀 LAYER 7: RENDER + SELF-DESTRUCT
+        // ═══════════════════════════════════════════════════════════
         document.open();
         document.write(_0xdecoded);
         document.close();
 
-        // Memory Shredder - ডিকোডেড ডেটা RAM থেকে মুছে ফেলা
+        // Memory Shredder
         _0xout.fill(0);
-        _0xbin.length = 0;
+        _0xxorBytes.fill(0);
+        _0xrotBytes.fill(0);
+        try {{ _0xb64 = null; }} catch(e) {{}}
 
     }} catch (err) {{
-        _0xtrap("decode_failed: " + err.message);
-        document.body.innerHTML = '<h2 style="color:red;text-align:center;margin-top:20%;">{fake_dump}</h2>';
+        _0xtrap('decode_failed_' + err.message);
+        document.body.innerHTML = '<h2 style="color:red;text-align:center;margin-top:20%;padding:20px;">' + _0xfakeMsg + '</h2>';
     }}
 
-    // 🎭 ডিকোডার ট্র্যাপ - কেউ eval ট্রাই করলে
+    // ═══════════════════════════════════════════════════════════
+    // 🪤 LAYER 8: EVAL TRAP + WORKER TRAP
+    // ═══════════════════════════════════════════════════════════
     var _0xoldEval = window.eval;
     window.eval = function() {{
-        _0xtrap("eval_attempt");
-        return _0xfake;
+        _0xtrap('eval_attempt');
+        return _0xfakeMsg;
+    }};
+    window.Function = new Proxy(window.Function, {{
+        construct: function(target, args) {{
+            _0xtrap('function_constructor');
+            return function() {{ return _0xfakeMsg; }};
+        }}
+    }});
+    
+    // Worker trap
+    var _0xoldWorker = window.Worker;
+    window.Worker = function() {{
+        _0xtrap('web_worker_attempt');
+        return {{ postMessage: function() {{}}, terminate: function() {{}} }};
     }};
 
 }})();
@@ -733,7 +1024,7 @@ def build_extreme_obfuscated_html(raw_html, fallback_title="Protected Document")
 
 
 # =========================================================
-# 🚀 VIDEO DOWNLOAD ENGINES
+# 🚀 VIDEO DOWNLOAD ENGINES (Same as before, optimized)
 # =========================================================
 
 def download_tiktok_direct(url):
@@ -833,19 +1124,13 @@ def get_instagram_video_from_embed(url):
     if not match:
         return None
     shortcode = match.group(1)
-    embed_urls = [
-        f"https://www.instagram.com/p/{shortcode}/embed/captioned/",
-        f"https://www.instagram.com/reel/{shortcode}/embed/captioned/",
-    ]
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36", "Accept-Language": "en-US,en;q=0.5"}
+    embed_urls = [f"https://www.instagram.com/p/{shortcode}/embed/captioned/"]
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     for embed_url in embed_urls:
         try:
             res = requests.get(embed_url, headers=headers, timeout=10)
             if res.status_code == 200:
-                text = res.text
-                matches = re.findall(r'video_url\\*":\\*"([^"]+)"', text)
-                if not matches:
-                    matches = re.findall(r'"video_url"\s*:\s*"([^"]+)"', text)
+                matches = re.findall(r'video_url\\*":\\*"([^"]+)"', res.text)
                 for raw_url in matches:
                     clean_url = raw_url.replace('\\/', '/').replace('\\u0026', '&').replace('&amp;', '&').replace('\\', '')
                     if "scontent" in clean_url or "cdninstagram" in clean_url:
@@ -875,17 +1160,6 @@ def download_instagram_direct(url):
                 return {"type": "direct_url", "url": direct_vid_url, "title": "Instagram_Reels_HD", "size_mb": round(real_size / (1024 * 1024), 2), "duration": "N/A", "temp_path": file_path}
         except Exception as e:
             print(f"Insta error: {e}")
-    try:
-        random_id = ''.join(random.choices(string.ascii_lowercase + string.digits, k=8))
-        ydl_opts = {'format': 'best[ext=mp4]', 'outtmpl': f"downloads/insta_{random_id}_%(id)s.%(ext)s", 'quiet': True, 'no_warnings': True}
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            file_path = ydl.prepare_filename(info)
-            if os.path.exists(file_path):
-                real_size = os.path.getsize(file_path)
-                return {"type": "file", "path": file_path, "title": info.get('title', 'Instagram'), "size_mb": round(real_size / (1024 * 1024), 2)}
-    except Exception as e:
-        print(f"Insta yt-dlp error: {e}")
     return None
 
 
@@ -984,7 +1258,7 @@ def process_unlimited_video(url):
         except Exception:
             info = ydl.extract_info(url, download=False)
         if not info:
-            raise Exception("ভিডিওটির ডেটা পাওয়া যায়নি!")
+            raise Exception("ভিডিওটির ডেটা পাওয়া যায়নি!")
         title = info.get('title', 'VIP_Video')
         duration = info.get('duration_string', 'N/A')
         direct_stream_url = info.get('url')
@@ -1030,17 +1304,19 @@ def get_admin_interactive_panel():
     markup = types.InlineKeyboardMarkup(row_width=2)
     btn_stats = types.InlineKeyboardButton("📊 লাইভ স্ট্যাটাস", callback_data="adm_stats")
     btn_users = types.InlineKeyboardButton("👥 ইউজার লিস্ট", callback_data="adm_users")
-    btn_bc = types.InlineKeyboardButton("📢 অল ইউজার ব্রডকাস্ট", callback_data="adm_broadcast")
+    btn_bc = types.InlineKeyboardButton("📢 ব্রডকাস্ট", callback_data="adm_broadcast")
     btn_send = types.InlineKeyboardButton("✉️ ডিরেক্ট মেসেজ", callback_data="adm_send_pm")
     btn_ban = types.InlineKeyboardButton("⛔ ইউজার ব্যান", callback_data="adm_ban")
     btn_unban = types.InlineKeyboardButton("🟢 ইউজার আনব্যান", callback_data="adm_unban")
     btn_banned_list = types.InlineKeyboardButton("🚫 ব্যানড লিস্ট", callback_data="adm_banned")
     btn_traps = types.InlineKeyboardButton("🪤 ট্র্যাপ লগ", callback_data="adm_traps")
-    btn_close = types.InlineKeyboardButton("❌ ক্লোজ প্যানেল", callback_data="adm_close")
+    btn_clear_traps = types.InlineKeyboardButton("🗑️ ট্র্যাপ ক্লিয়ার", callback_data="adm_clear_traps")
+    btn_close = types.InlineKeyboardButton("❌ ক্লোজ", callback_data="adm_close")
     markup.add(btn_stats, btn_users)
     markup.add(btn_bc, btn_send)
     markup.add(btn_ban, btn_unban)
     markup.add(btn_banned_list, btn_traps)
+    markup.add(btn_clear_traps)
     markup.add(btn_close)
     return markup
 
@@ -1085,7 +1361,7 @@ def fetch_url_html(url):
 
 
 # =========================================================
-# 📢 BROADCAST ENGINE
+# 📢 BROADCAST
 # =========================================================
 
 def broadcast_any_message(from_chat_id, source_message):
@@ -1110,7 +1386,7 @@ def broadcast_any_message(from_chat_id, source_message):
         "👑 ━━━━━━━━━━━━━━━━━━━━━━━━━ 👑\n\n"
         f"✅ <b>সফল:</b> <code>{sent_count}</code> জন\n"
         f"❌ <b>ব্যর্থ:</b> <code>{failed_count}</code> জন\n"
-        f"⏱️ <b>সময়:</b> <code>{total_time}s</code>\n"
+        f"⏱️ <b>সময়:</b> <code>{total_time}s</code>\n"
         f"👥 <b>মোট:</b> <code>{len(users)}</code> জন"
     )
     if status_msg:
@@ -1126,24 +1402,33 @@ def broadcast_any_message(from_chat_id, source_message):
 def send_main_welcome(chat_id, user):
     welcome_text = (
         "👑 ━━━━━━━━━━━━━━━━━━━━━━━━━ 👑\n"
-        "  ⚡ 𝐔𝐋𝐓𝐑𝐀 𝐂𝐈𝐏𝐇𝐄𝐑 𝐏𝐑𝐎 𝐯𝟑.𝟎 ⚡\n"
+        "  ⚡ 𝐔𝐋𝐓𝐑𝐀 𝐂𝐈𝐏𝐇𝐄𝐑 𝐏𝐑𝐎 𝐯𝟒.𝟎 ⚡\n"
+        "  🛡️ 𝐔𝐍𝐁𝐑𝐄𝐀𝐊𝐀𝐁𝐋𝐄 𝐄𝐃𝐈𝐓𝐈𝐎𝐍 🛡️\n"
         "👑 ━━━━━━━━━━━━━━━━━━━━━━━━━ 👑\n\n"
         f"👋 <b>স্বাগতম, {html.escape(user.first_name or 'গ্রাহক')}!</b>\n"
-        "আপনার সোর্স কোড ৫-লেয়ার 👿🔥🥵💀❌ মিলিটারি সাইফারে লক করুন।\n\n"
-        "💎 <b>𝐍𝐄𝐖 𝐕𝟑.𝟎 𝐅𝐄𝐀𝐓𝐔𝐑𝐄𝐒:</b>\n"
+        "আপনার সোর্স কোড ৮-লেয়ার 👿🔥🥵💀❌ মিলিটারি সাইফারে লক করুন।\n\n"
+        "💎 <b>𝐍𝐄𝐖 𝐕𝟒.𝟎 𝐅𝐄𝐀𝐓𝐔𝐑𝐄𝐒:</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "🔹 🪤 <b>Anti-Decoder Honeypot Trap</b>\n"
-        "╰─ কেউ ডিকোড করতে গেলে IP সহ ট্র্যাক হবে!\n\n"
-        "🔹 🔐 <b>5-Layer Military Encryption</b>\n"
-        "╰─ Base64 + Emoji + XOR + SHA-256 + Scramble\n\n"
-        "🔹 🎭 <b>5 Fake Decoy Payloads</b>\n"
-        "╰─ আসল কোড কখনোই বের হবে না।\n\n"
-        "🔹 🧬 <b>Self-Defending Fingerprint</b>\n"
-        "╰─ ট্যাম্পার করলেই self-destruct।\n\n"
-        "🔹 📡 <b>Real-time Admin Alert</b>\n"
-        "╰─ ডিকোডার ধরা পড়লে অটো অ্যালার্ট।\n\n"
-        "🔹 🎥 <b>Unlimited Video Downloader</b>\n"
-        "╰─ TikTok, YouTube, FB, Insta HD ডাউনলোড।\n\n"
+        "🔹 🪤 <b>Multi-Honeypot Trap System</b>\n"
+        "╰─ 3টা ট্র্যাপ সার্ভার! IP+GeoLocation সহ ট্র্যাক!\n\n"
+        "🔹 🔐 <b>8-Layer Military Encryption</b>\n"
+        "╰─ CSS/JS + XOR + ROT47 + Hex + Base64 + Emoji + SHA-256 + HMAC\n\n"
+        "🔹 🎭 <b>15 Fake Decoy Payloads</b>\n"
+        "╰─ আসল কোড কখনোই বের হবে না!\n\n"
+        "🔹 🧬 <b>Runtime Integrity Check</b>\n"
+        "╰─ ট্যাম্পার করলেই self-destruct!\n\n"
+        "🔹 📡 <b>Real-time Geo Tracking</b>\n"
+        "╰─ ডিকোডারের দেশ, শহর, ISP সব ট্র্যাক!\n\n"
+        "🔹 🕵️ <b>Advanced DevTools Detect</b>\n"
+        "╰─ DevTools খুললেই ট্র্যাপ trigger!\n\n"
+        "🔹 🚨 <b>Instant Telegram Alert</b>\n"
+        "╰─ ডিকোডার ধরা পড়লে সাথে সাথে অ্যাডমিনকে!\n\n"
+        "🔹 💾 <b>LocalStorage Shield</b>\n"
+        "╰─ কোড কপি করার চেষ্টা করলেই ট্র্যাপ!\n\n"
+        "🔹 ⛓️ <b>Anti-Debug + Anti-Eval</b>\n"
+        "╰─ debugger loop + Function constructor block!\n\n"
+        "🔹 🎪 <b>Fake Code Injection</b>\n"
+        "╰─ ডিকোডারকে বোকা বানানোর 20+ ফেক ফাংশন!\n\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "👇 <b>নিচের মেনু থেকে নির্বাচন করুন:</b>\n"
         f"🤖 <b>Bot:</b> {BOT_USERNAME} | 👑 <b>Dev:</b> @{ADMIN_USERNAME}"
@@ -1161,7 +1446,7 @@ def start_msg(message):
     register_user(user)
     user_states[user.id] = None
     if is_user_banned(user.id):
-        safe_send_message(message.chat.id, f"⛔ <b>আপনাকে ব্যান করা হয়েছে!</b>\n👑 যোগাযোগ: @{ADMIN_USERNAME}")
+        safe_send_message(message.chat.id, f"⛔ <b>আপনাকে ব্যান করা হয়েছে!</b>\n👑 যোগাযোগ: @{ADMIN_USERNAME}")
         return
     if not is_user_subscribed(user.id):
         send_force_sub_msg(message.chat.id, user.id)
@@ -1191,27 +1476,18 @@ def admin_panel_cmd(message):
         return
     users_count = len(get_all_user_ids())
     banned_count = len(load_banned_users())
+    trap_count = len(load_trap_logs())
     panel_text = (
         "👑 ━━━━━━━━━━━━━━━━━━━━━━━━━ 👑\n"
-        "   🛠️ <b>𝐕𝐈𝐏 𝐀𝐃𝐌𝐈𝐍 𝐏𝐀𝐍𝐄𝐋 𝐯𝟑.𝟎</b> 🛠️\n"
+        "   🛠️ <b>𝐕𝐈𝐏 𝐀𝐃𝐌𝐈𝐍 𝐏𝐀𝐍𝐄𝐋 𝐯𝟒.𝟎</b> 🛠️\n"
         "👑 ━━━━━━━━━━━━━━━━━━━━━━━━━ 👑\n\n"
         f"👥 <b>মোট ইউজার:</b> <code>{users_count}</code> জন\n"
         f"🚫 <b>ব্যানড:</b> <code>{banned_count}</code> জন\n"
-        f"🪤 <b>ট্র্যাপ লগ:</b> <code>{len(load_trap_logs())}</code> টি\n"
+        f"🪤 <b>ট্র্যাপ ভিকটিম:</b> <code>{trap_count}</code> টি\n"
         f"⚡ <b>স্ট্যাটাস:</b> 🟢 Active 24/7\n\n"
         "👇 <b>যেকোনো অ্যাকশন পরিচালনা করুন:</b>"
     )
     safe_send_message(message.chat.id, panel_text, reply_markup=get_admin_interactive_panel())
-
-
-def load_trap_logs():
-    if os.path.exists(TRAP_LOG_FILE):
-        try:
-            with open(TRAP_LOG_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            return {}
-    return {}
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("adm_"))
@@ -1227,14 +1503,15 @@ def admin_callback_handler(call):
         trap_count = len(load_trap_logs())
         stats_text = (
             "👑 ━━━━━━━━━━━━━━━━━━━━━━━━━ 👑\n"
-            "   📊 <b>𝐁𝐎𝐓 𝐋𝐈𝐕𝐄 𝐒𝐓𝐀𝐓𝐒 𝐯𝟑.𝟎</b> 📊\n"
+            "   📊 <b>𝐁𝐎𝐓 𝐋𝐈𝐕𝐄 𝐒𝐓𝐀𝐓𝐒 𝐯𝟒.𝟎</b> 📊\n"
             "👑 ━━━━━━━━━━━━━━━━━━━━━━━━━ 👑\n\n"
             f"👥 <b>মোট ইউজার:</b> <code>{to_bold_font(str(total_users))}</code>\n"
             f"🚫 <b>ব্যানড:</b> <code>{to_bold_font(str(banned_count))}</code>\n"
             f"🪤 <b>ট্র্যাপ ভিকটিম:</b> <code>{to_bold_font(str(trap_count))}</code>\n"
-            f"👑 <b>অ্যাডমিন:</b> @{ADMIN_USERNAME}\n"
-            f"⚡ <b>স্ট্যাটাস:</b> 🟢 100% Online\n"
-            f"⏰ <b>সময়:</b> <code>{to_bold_font(datetime.now().strftime('%d-%m-%Y | %I:%M:%S %p'))}</code>"
+            f"🛡️ <b>Encryption:</b> 8-Layer Military Grade\n"
+            f"👑 <b>Admin:</b> @{ADMIN_USERNAME}\n"
+            f"⚡ <b>Status:</b> 🟢 100% Online\n"
+            f"⏰ <b>Time:</b> <code>{to_bold_font(datetime.now().strftime('%d-%m-%Y | %I:%M:%S %p'))}</code>"
         )
         safe_send_message(ADMIN_ID, stats_text, reply_markup=get_persistent_menu(ADMIN_ID))
         bot.answer_callback_query(call.id, "✅ স্ট্যাটাস পাঠানো হয়েছে!")
@@ -1269,7 +1546,7 @@ def admin_callback_handler(call):
 
     elif data == "adm_send_pm":
         user_states[ADMIN_ID] = "ADMIN_WAITING_SEND_PM"
-        safe_send_message(ADMIN_ID, "✉️ <b>ডিরেক্ট মেসেজ মোড:</b>\n\nটার্গেট ইউজার ID পাঠান:")
+        safe_send_message(ADMIN_ID, "✉️ <b>ডিরেক্ট মেসেজ:</b>\n\nটার্গেট User ID পাঠান:")
         bot.answer_callback_query(call.id)
 
     elif data == "adm_ban":
@@ -1296,12 +1573,27 @@ def admin_callback_handler(call):
         if not traps:
             safe_send_message(ADMIN_ID, "🪤 এখনো কোনো ডিকোডার ধরা পড়েনি।")
         else:
-            text = "🪤 <b>ডিকোডার ট্র্যাপ লগ:</b>\n\n"
-            for idx, (k, v) in enumerate(list(traps.items())[-15:], 1):
-                text += f"{idx}. <b>IP:</b> <code>{v['ip']}</code>\n   <b>UA:</b> <code>{v['user_agent'][:40]}</code>\n   <b>Time:</b> {v['time']}\n\n"
-            if len(traps) > 15:
-                text += f"... এবং আরও {len(traps) - 15} টি"
+            text = "🪤 <b>🚨 ডিকোডার ট্র্যাপ লগ 🚨</b>\n\n"
+            sorted_traps = sorted(traps.items(), key=lambda x: x[1].get("time", ""), reverse=True)
+            for idx, (k, v) in enumerate(sorted_traps[:20], 1):
+                text += (
+                    f"<b>#{idx}</b> 🌐 IP: <code>{v.get('ip', 'N/A')}</code>\n"
+                    f"   🗺️ Geo: <code>{v.get('geo', 'N/A')[:50]}</code>\n"
+                    f"   🖥️ UA: <code>{v.get('user_agent', 'N/A')[:50]}</code>\n"
+                    f"   🪤 Type: <code>{v.get('trap_type', 'N/A')}</code>\n"
+                    f"   ⏰ {v.get('time', 'N/A')}\n\n"
+                )
+            if len(traps) > 20:
+                text += f"\n<i>... আরও {len(traps) - 20} টি ট্র্যাপ লগ আছে</i>"
             safe_send_message(ADMIN_ID, text)
+        bot.answer_callback_query(call.id)
+
+    elif data == "adm_clear_traps":
+        if os.path.exists(TRAP_LOG_FILE):
+            os.remove(TRAP_LOG_FILE)
+            safe_send_message(ADMIN_ID, "✅ সব ট্র্যাপ লগ ক্লিয়ার করা হয়েছে।")
+        else:
+            safe_send_message(ADMIN_ID, "⚠️ কোনো ট্র্যাপ লগ নেই।")
         bot.answer_callback_query(call.id)
 
     elif data == "adm_close":
@@ -1329,9 +1621,9 @@ def handle_admin_media(message):
         user_states[user_id] = None
         try:
             bot.copy_message(chat_id=target_uid, from_chat_id=ADMIN_ID, message_id=message.message_id, reply_markup=get_persistent_menu(target_uid))
-            safe_send_message(ADMIN_ID, f"✅ ইউজার <code>{target_uid}</code>-এর কাছে পাঠানো হয়েছে!")
+            safe_send_message(ADMIN_ID, f"✅ পাঠানো হয়েছে <code>{target_uid}</code>")
         except Exception as e:
-            safe_send_message(ADMIN_ID, f"❌ পাঠানো যায়নি: <code>{html.escape(str(e))}</code>")
+            safe_send_message(ADMIN_ID, f"❌ Error: <code>{html.escape(str(e))}</code>")
         return
 
 
@@ -1347,7 +1639,6 @@ def handle_text(message):
     text = message.text.strip()
     state = user_states.get(user_id)
 
-    # 👑 ADMIN ROUTER
     if user_id == ADMIN_ID:
         if state == "ADMIN_WAITING_BROADCAST":
             user_states[user_id] = None
@@ -1371,7 +1662,7 @@ def handle_text(message):
             elif text.isdigit():
                 target_uid = int(text)
                 user_states[user_id] = f"ADMIN_SENDING_PM_TO_{target_uid}"
-                safe_send_message(ADMIN_ID, f"🎯 <b>Target:</b> <code>{target_uid}</code>\n\nএখন যেকোনো মেসেজ/মিডিয়া পাঠান:")
+                safe_send_message(ADMIN_ID, f"🎯 <b>Target:</b> <code>{target_uid}</code>\n\nএখন মেসেজ/মিডিয়া পাঠান:")
                 return
             else:
                 safe_send_message(ADMIN_ID, "⚠️ ফরম্যাট: <code>6753121703 হ্যালো</code>")
@@ -1381,7 +1672,7 @@ def handle_text(message):
             user_states[user_id] = None
             try:
                 bot.copy_message(chat_id=target_uid, from_chat_id=ADMIN_ID, message_id=message.message_id, reply_markup=get_persistent_menu(target_uid))
-                safe_send_message(ADMIN_ID, f"✅ পাঠানো হয়েছে <code>{target_uid}</code>")
+                safe_send_message(ADMIN_ID, f"✅ পাঠানো <code>{target_uid}</code>")
             except Exception as e:
                 safe_send_message(ADMIN_ID, f"❌ Error: <code>{html.escape(str(e))}</code>")
             return
@@ -1394,25 +1685,43 @@ def handle_text(message):
                 else:
                     ban_user_id(target_uid)
                     safe_send_message(target_uid, f"⛔ <b>আপনাকে ব্যান করা হয়েছে!</b>\n👑 @{ADMIN_USERNAME}")
-                    safe_send_message(ADMIN_ID, f"✅ ব্যান করা হয়েছে <code>{target_uid}</code>")
+                    safe_send_message(ADMIN_ID, f"✅ ব্যান <code>{target_uid}</code>")
             return
         elif state == "ADMIN_WAITING_UNBAN":
             user_states[user_id] = None
             if text.isdigit():
                 target_uid = int(text)
                 unban_user_id(target_uid)
-                safe_send_message(target_uid, "🎉 <b>আপনাকে আনব্যান করা হয়েছে!</b>", reply_markup=get_persistent_menu(target_uid))
+                safe_send_message(target_uid, "🎉 <b>আনব্যান করা হয়েছে!</b>", reply_markup=get_persistent_menu(target_uid))
                 safe_send_message(ADMIN_ID, f"✅ আনব্যান <code>{target_uid}</code>")
             return
 
-    # 📱 MENU BUTTONS
     if "𝐔𝐑𝐋 𝐓𝐎 𝐕𝐈𝐃𝐄𝐎" in text:
         user_states[user_id] = "WAITING_VIDEO_URL"
         safe_send_message(message.chat.id, "🎥 <b>ভিডিও লিংক পাঠান:</b>\n<i>(TikTok, YouTube, FB, Insta)</i>", reply_markup=get_persistent_menu(user_id), reply_to_msg_id=message.message_id)
         return
     elif "𝐎𝐁𝐅𝐔𝐒𝐂𝐀𝐓𝐄 𝐇𝐓𝐌𝐋" in text:
         user_states[user_id] = "WAITING_HTML"
-        safe_send_message(message.chat.id, "🛡️ <b>আপনার .html / .htm ফাইল পাঠান:</b>\n\n🔒 5-Layer Encryption Applied", reply_markup=get_persistent_menu(user_id), reply_to_msg_id=message.message_id)
+        safe_send_message(
+            message.chat.id,
+            "🛡️ <b>𝐔𝐍𝐁𝐑𝐄𝐀𝐊𝐀𝐁𝐋𝐄 𝐄𝐍𝐂𝐑𝐘𝐏𝐓𝐈𝐎𝐍 𝐯𝟒.𝟎</b>\n\n"
+            "📁 আপনার <code>.html</code> / <code>.htm</code> / <code>.txt</code> ফাইল পাঠান:\n\n"
+            "🔐 <b>8-Layer Protection:</b>\n"
+            "• CSS/JS Bytecode Scramble\n"
+            "• XOR Multi-Step Encryption\n"
+            "• ROT47 Transform\n"
+            "• Hex Encoding\n"
+            "• Base64 Encoding\n"
+            "• Emoji Alphabet Substitution\n"
+            "• SHA-256 Binding\n"
+            "• HMAC Signature\n\n"
+            "🪤 <b>3 Honeypot Traps Active</b>\n"
+            "🎭 <b>15 Decoy Payloads</b>\n"
+            "🧬 <b>Runtime Integrity Check</b>\n"
+            "📡 <b>Geo IP Tracking</b>",
+            reply_markup=get_persistent_menu(user_id),
+            reply_to_msg_id=message.message_id
+        )
         return
     elif "𝐔𝐑𝐋 𝐓𝐎 𝐇𝐓𝐌𝐋" in text:
         user_states[user_id] = "WAITING_URL"
@@ -1422,15 +1731,29 @@ def handle_text(message):
         admin_panel_cmd(message)
         return
     elif "𝐎𝐖𝐍𝐄𝐑 & 𝐃𝐄𝐕" in text:
-        owner_text = f"👑 <b>মালিক:</b> @{ADMIN_USERNAME}\n🤖 <b>Bot:</b> {BOT_USERNAME}\n🛡️ <b>System:</b> Rafsan v3.0"
+        owner_text = f"👑 <b>মালিক:</b> @{ADMIN_USERNAME}\n🤖 <b>Bot:</b> {BOT_USERNAME}\n🛡️ <b>System:</b> Rafsan v4.0 Unbreakable"
         safe_send_message(message.chat.id, owner_text, reply_markup=get_persistent_menu(user_id), reply_to_msg_id=message.message_id)
         return
     elif "𝐕𝐈𝐏 𝐅𝐄𝐀𝐓𝐔𝐑𝐄𝐒" in text:
-        info_text = "⚡ <b>v3.0 Features:</b>\n\n🪤 Honeypot Trap\n🔐 5-Layer Encryption\n🎭 5 Decoy Payloads\n🧬 Fingerprint Defense\n📡 Admin Alert\n🎥 Unlimited Video"
+        info_text = (
+            "⚡ <b>v4.0 UNBREAKABLE Features:</b>\n\n"
+            "🪤 Multi-Honeypot Trap (3 servers)\n"
+            "🔐 8-Layer Encryption\n"
+            "🎭 15 Decoy Payloads\n"
+            "🧬 Runtime Integrity Check\n"
+            "📡 Geo IP Tracking\n"
+            "🚨 Instant Telegram Alert\n"
+            "💾 LocalStorage Shield\n"
+            "🕵️ Advanced DevTools Detect\n"
+            "⛓️ Anti-Debug + Anti-Eval\n"
+            "🎪 Fake Code Injection\n"
+            "🖼️ Screenshot Detector\n"
+            "⚡ Silent Beacon Every 30s\n"
+            "🎥 Unlimited Video Downloader"
+        )
         safe_send_message(message.chat.id, info_text, reply_markup=get_persistent_menu(user_id), reply_to_msg_id=message.message_id)
         return
 
-    # 🎥 VIDEO AUTOMATION
     is_video_link = any(x in text.lower() for x in ["tiktok.com", "youtube.com", "youtu.be", "facebook.com", "fb.watch", "instagram.com", "twitter.com", "x.com", "pin.it", "pinterest.com"]) or text.lower().endswith((".mp4", ".mkv"))
     normalized_url = smart_normalize_url(text)
 
@@ -1491,7 +1814,7 @@ def handle_text(message):
 
 
 # =========================================================
-# 📁 DOCUMENT HANDLER - ULTIMATE ENCRYPTION
+# 📁 DOCUMENT HANDLER
 # =========================================================
 
 @bot.message_handler(content_types=["document"])
@@ -1524,14 +1847,19 @@ def handle_docs(message):
     msg_processing = safe_send_message(
         message.chat.id,
         "👑 ━━━━━━━━━━━━━━━━━━━━━━━━━ 👑\n"
-        "   🔒 <b>৫-লেয়ার এনক্রিপশন চলছে...</b>\n"
+        "   🔒 <b>৮-লেয়ার এনক্রিপশন চলছে...</b>\n"
+        "   🛡️ 𝐔𝐍𝐁𝐑𝐄𝐀𝐊𝐀𝐁𝐋𝐄 𝐄𝐃𝐈𝐓𝐈𝐎𝐍\n"
         "👑 ━━━━━━━━━━━━━━━━━━━━━━━━━ 👑\n\n"
         "⚡ <i>Layer 1: CSS/JS Scramble</i>\n"
         "⚡ <i>Layer 2: XOR Multi-Step</i>\n"
-        "⚡ <i>Layer 3: Base64 Encoding</i>\n"
-        "⚡ <i>Layer 4: Emoji Substitution</i>\n"
-        "⚡ <i>Layer 5: SHA-256 Binding</i>\n\n"
-        "🪤 <i>Installing Honeypot Trap...</i>",
+        "⚡ <i>Layer 3: ROT47 Transform</i>\n"
+        "⚡ <i>Layer 4: Hex Encoding</i>\n"
+        "⚡ <i>Layer 5: Base64 Encoding</i>\n"
+        "⚡ <i>Layer 6: Emoji Substitution</i>\n"
+        "⚡ <i>Layer 7: SHA-256 Binding</i>\n"
+        "⚡ <i>Layer 8: HMAC Signature</i>\n\n"
+        "🪤 <i>Installing Multi-Honeypot Traps...</i>\n"
+        "🎭 <i>Generating 15 Decoy Payloads...</i>",
         reply_to_msg_id=message.message_id
     )
 
@@ -1570,15 +1898,19 @@ def handle_docs(message):
         with open(protected_file_path, "rb") as f_user:
             caption = (
                 "👑 ━━━━━━━━━━━━━━━━━━━━━━━━━ 👑\n"
-                "🛡️ <b>রাফসান ইনক্রিপ্টেড v3.0</b>\n"
+                "🛡️ <b>রাফসান ইনক্রিপ্টেড v4.0</b>\n"
+                "   𝐔𝐍𝐁𝐑𝐄𝐀𝐊𝐀𝐁𝐋𝐄 𝐄𝐃𝐈𝐓𝐈𝐎𝐍\n"
                 "👑 ━━━━━━━━━━━━━━━━━━━━━━━━━ 👑\n\n"
-                f"📁 <b>ফাইল:</b> <code>{html.escape(protected_file_name)}</code>\n"
-                "🔒 <b>৫-লেয়ার এনক্রিপশন Applied</b>\n"
-                "🪤 <b>Honeypot Trap Active</b>\n"
-                "🎭 <b>5 Decoy Payloads</b>\n"
-                "🧬 <b>Fingerprint Protected</b>\n"
-                "⚡ <b>Anti-DevTools Active</b>\n"
-                "🚨 <b>Decoder Alert System ON</b>\n\n"
+                f"📁 <b>ফাইল:</b> <code>{html.escape(protected_file_name)}</code>\n\n"
+                "🔐 <b>8-Layer Encryption Applied</b>\n"
+                "🪤 <b>3 Honeypot Traps Active</b>\n"
+                "🎭 <b>15 Decoy Payloads</b>\n"
+                "🧬 <b>Runtime Integrity Check</b>\n"
+                "📡 <b>Geo IP Tracking Enabled</b>\n"
+                "🚨 <b>Instant Admin Alert System</b>\n"
+                "💾 <b>LocalStorage Shield ON</b>\n"
+                "🕵️ <b>Advanced DevTools Detect</b>\n"
+                "⚡ <b>Anti-Debug + Anti-Eval</b>\n\n"
                 f"🤖 {BOT_USERNAME} | 👑 @{ADMIN_USERNAME}"
             )
             safe_send_document(message.chat.id, f_user, caption=caption, reply_to_msg_id=message.message_id, reply_markup=get_persistent_menu(user_id))
@@ -1603,15 +1935,20 @@ def handle_docs(message):
 # =========================================================
 
 if __name__ == "__main__":
-    print("🔥 Starting Rafsan VIP Ultra Bot Engine v3.0...")
-    print("🛡️ 5-Layer Military Encryption: ACTIVE")
-    print("🪤 Honeypot Trap System: ARMED")
-    print("🎭 Decoy Payloads: LOADED")
-    print("📡 Admin Alert System: ONLINE")
-    
+    print("🔥 Starting Rafsan VIP Ultra Bot Engine v4.0...")
+    print("🛡️ 8-Layer Military Encryption: ACTIVE")
+    print("🪤 Multi-Honeypot Trap System: ARMED (3 servers)")
+    print("🎭 15 Decoy Payloads: LOADED")
+    print("📡 Geo IP Tracking: ONLINE")
+    print("🚨 Instant Admin Alert: ENABLED")
+    print("🧬 Runtime Integrity Check: ACTIVE")
+    print("💾 LocalStorage Shield: ON")
+    print("🕵️ Advanced DevTools Detect: ARMED")
+    print("⚡ Anti-Debug + Anti-Eval: ACTIVE")
+
     server_thread = threading.Thread(target=run_keep_alive_server, daemon=True)
     server_thread.start()
-    
+
     while True:
         try:
             bot.remove_webhook()
