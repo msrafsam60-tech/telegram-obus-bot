@@ -1,0 +1,6 @@
+pyTelegramBotAPI
+requests
+yt-dlp
+urllib3
+certifi
+
