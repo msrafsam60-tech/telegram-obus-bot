@@ -4,3 +4,4 @@ tgcrypto
 py-tgcalls
 cryptography
 python-dotenv
+qrcode[pil]
