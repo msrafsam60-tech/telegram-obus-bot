@@ -36,10 +36,13 @@ logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("bot")
 
 # ====== আপনার কনফিগ (এখানেই বসানো আছে) ======
-BOT_TOKEN = "9103406052:AAE0c-mYIWKZ7bR-kFVQWMqtTYq2JLUXIjs"
-API_ID = 35271075
-API_HASH = "e8c3704b92160afdc08a81c1156197cc"
-OWNER_ID = 8455803496
+BOT_TOKEN = os.environ["BOT_TOKEN"]
+API_ID = int(os.environ["API_ID"])
+API_HASH = os.environ["API_HASH"]
+OWNER_ID = int(os.environ["OWNER_ID"])
+# Railway Volume mount path (e.g. /data). Locally defaults to current folder.
+DATA_DIR = os.environ.get("DATA_DIR", ".")
+os.makedirs(DATA_DIR, exist_ok=True)
 DELAY = float(os.environ.get("DELAY", "1"))  # seconds between accounts (FloodWait protection)
 
 # ====== Telegram Premium emoji (optional) ======
@@ -62,7 +65,7 @@ def norm(e):
 
 
 # ---------- encryption + db ----------
-KEY_FILE = "secret.key"
+KEY_FILE = os.path.join(DATA_DIR, "secret.key")
 if os.environ.get("ENC_KEY"):
     KEY = os.environ["ENC_KEY"].encode()
 elif os.path.exists(KEY_FILE):
@@ -72,7 +75,7 @@ else:
     open(KEY_FILE, "wb").write(KEY)
 fernet = Fernet(KEY)
 
-db = sqlite3.connect("data.db")
+db = sqlite3.connect(os.path.join(DATA_DIR, "data.db"))
 db.executescript("""
 CREATE TABLE IF NOT EXISTS clients(id INTEGER PRIMARY KEY, name TEXT, phone TEXT, session BLOB, owner INTEGER);
 CREATE TABLE IF NOT EXISTS users(user_id INTEGER PRIMARY KEY, name TEXT, username TEXT, status TEXT);
@@ -624,22 +627,80 @@ async def remove_cmd(m: Message):
     await m.answer("🗑 Removed: " + ", ".join(names))
 
 
+
+def _proxy():
+    """Optional proxy for login (set PROXY_URL=socks5://user:pass@host:port in Railway Variables)."""
+    u = os.environ.get("PROXY_URL", "").strip()
+    if not u:
+        return None
+    from urllib.parse import urlparse
+    x = urlparse(u)
+    return dict(scheme=x.scheme or "socks5", hostname=x.hostname, port=x.port,
+                username=x.username, password=x.password)
+
+
+def login_client(uid):
+    return Client(f"login{uid}", api_id=API_ID, api_hash=API_HASH, in_memory=True, proxy=_proxy(),
+                  device_model="Samsung Galaxy S23", system_version="Android 13",
+                  app_version="10.14.5", lang_code="en")
+
+
+def code_where(sent):
+    t = str(getattr(sent.type, "name", sent.type))
+    n = str(getattr(sent.next_type, "name", sent.next_type)) if sent.next_type else None
+    where = {"APP": "📲 Telegram app (the 'Telegram' service chat on any device where this account is logged in)",
+             "SMS": "💬 SMS", "CALL": "📞 phone call", "FLASH_CALL": "📞 flash call",
+             "MISSED_CALL": "📞 missed call (last digits of the number)", "FRAGMENT_SMS": "💎 Fragment SMS",
+             "FIREBASE_SMS": "💬 SMS", "EMAIL_CODE": "📧 email"}.get(t, t)
+    txt = f"Code sent via: {where}"
+    if n:
+        txt += f"\nNext option after /resend: {n}"
+    return txt
+
+
 @dp.message(S.phone)
 async def got_phone(m: Message, state: FSMContext):
-    phone = m.text.strip().replace(" ", "")
-    app = Client(f"login{m.from_user.id}", api_id=API_ID, api_hash=API_HASH, in_memory=True)
+    phone = m.text.strip().replace(" ", "").replace("-", "")
+    if not phone.startswith("+"):
+        phone = "+" + phone
+    old = PENDING.pop(m.from_user.id, None)
+    if old:
+        try: await old["app"].disconnect()
+        except Exception: pass
+    app = login_client(m.from_user.id)
     try:
         await app.connect()
         sent = await app.send_code(phone)
+    except FloodWait as e:
+        try: await app.disconnect()
+        except Exception: pass
+        return await m.answer(f"⏳ Telegram says wait {e.value} seconds ({e.value // 60} min) before asking a code for this number. Do NOT retry until then.")
     except Exception as e:
         try: await app.disconnect()
         except Exception: pass
-        return await m.answer(f"❌ Could not send code: {h(e)}\nTry again or tap 🔙 Back.")
+        return await m.answer(f"❌ Could not send code: {h(e.__class__.__name__)}: {h(e)}\nTry again or tap 🔙 Back.")
     PENDING[m.from_user.id] = dict(app=app, phone=phone, hash=sent.phone_code_hash)
     await state.set_state(S.otp)
     await m.answer(
-        f"🔑 OTP sent to {h(phone)}\n\nSend the login code. You can paste the full message — I'll extract the digits automatically.\n\n"
+        f"🔑 Code requested for {h(phone)}\n\n{h(code_where(sent))}\n\n"
+        "Type the code with dashes so Telegram doesn't expire it: <code>1-2-3-4-5</code>\n"
+        "Code not arriving? Send /resend to try the next method (SMS / call).\n\n"
         "Tap 🔙 Back to cancel, or send /cancel to abort.")
+
+
+@dp.message(Command("resend"), S.otp)
+async def resend_code_cmd(m: Message):
+    p = PENDING.get(m.from_user.id)
+    if not p:
+        return await m.answer("❌ No login in progress. Send the phone number again.")
+    try:
+        sent = await p["app"].resend_code(p["phone"], p["hash"])
+    except FloodWait as e:
+        return await m.answer(f"⏳ Wait {e.value} seconds before resending.")
+    except Exception as e:
+        return await m.answer(f"❌ Resend failed: {h(e.__class__.__name__)}: {h(e)}")
+    p["hash"] = sent.phone_code_hash
+    await m.answer(f"🔁 New code requested.\n\n{h(code_where(sent))}\n\nType it like <code>1-2-3-4-5</code>.")
 
 
 async def finish_login(m: Message, state: FSMContext, p):
