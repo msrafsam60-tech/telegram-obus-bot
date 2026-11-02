@@ -1,6 +1,6 @@
-pyTelegramBotAPI
-requests
-yt-dlp
-urllib3
-certifi
-
+aiogram>=3.25
+kurigram
+tgcrypto
+py-tgcalls
+cryptography
+python-dotenv
