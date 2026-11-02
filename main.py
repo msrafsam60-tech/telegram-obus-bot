@@ -11,7 +11,7 @@ REQUIREMENTS (Wispbyte-এ requirements.txt ফাইলে এগুলো ব�
 
 RUN: python main.py   (Startup file = main.py)
 """
-import asyncio, html, logging, os, re, secrets, sqlite3, time
+import asyncio, io, html, logging, os, re, secrets, sqlite3, time
 from cryptography.fernet import Fernet
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, F, BaseMiddleware
@@ -22,12 +22,14 @@ from aiogram.filters import Command, CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import (Message, CallbackQuery, ReplyKeyboardMarkup, KeyboardButton,
+from aiogram.types import (BufferedInputFile, Message, CallbackQuery, ReplyKeyboardMarkup, KeyboardButton,
                            InlineKeyboardMarkup, InlineKeyboardButton)
 from pyrogram import Client, filters
 from pyrogram.handlers import MessageHandler
+from pyrogram.qrlogin import QRLogin
 from pyrogram.errors import (FloodWait, SessionPasswordNeeded, PhoneCodeInvalid,
-                             PhoneCodeExpired, PasswordHashInvalid, UserAlreadyParticipant)
+                             PhoneCodeExpired, PasswordHashInvalid, UserAlreadyParticipant,
+                             AuthTokenExpired)
 from pyrogram.raw.functions.messages import GetMessagesViews
 from pytgcalls import PyTgCalls
 
@@ -371,7 +373,7 @@ class PremiumMW(BaseRequestMiddleware):
 
 
 class S(StatesGroup):
-    phone = State(); otp = State(); pwd = State()
+    phone = State(); otp = State(); pwd = State(); qr = State()
     join = State(); jvc = State(); lvc = State()
     react_link = State(); react_emoji = State()
     ar_chat = State(); ar_emoji = State(); av_chat = State()
@@ -453,6 +455,9 @@ async def start(m: Message, state: FSMContext):
 async def cancel(m: Message, state: FSMContext):
     p = PENDING.pop(m.from_user.id, None)
     if p:
+        t = p.get("task")
+        if t and not t.done():
+            t.cancel()
         try: await p["app"].disconnect()
         except Exception: pass
     await state.clear()
@@ -596,7 +601,7 @@ async def my_clients(m: Message):
 async def add_client_btn(m: Message):
     await m.answer(
         hd("➕", "Add account", "phone number + OTP login") + "Tap the button to start.",
-        reply_markup=ikb([("📱 Add by Phone Number", "add_phone", "primary")]))
+        reply_markup=ikb([("📱 Add by Phone Number", "add_phone", "primary"), ("🔳 Add by QR (no code needed)", "add_qr", "primary")]))
 
 
 @dp.callback_query(F.data == "add_phone")
@@ -606,6 +611,67 @@ async def add_phone(c: CallbackQuery, state: FSMContext):
         "📱 Add by Phone Number\n\nSend the Telegram account phone number with country code, e.g. +1234567890.\n\n"
         "Tap 🔙 Back to cancel, or send /cancel to abort.", reply_markup=back_kb())
     await c.answer()
+
+
+
+@dp.callback_query(F.data == "add_qr")
+async def add_qr(c: CallbackQuery, state: FSMContext):
+    uid = c.from_user.id
+    old = PENDING.pop(uid, None)
+    if old:
+        t = old.get("task")
+        if t and not t.done():
+            t.cancel()
+        try: await old["app"].disconnect()
+        except Exception: pass
+    await state.set_state(S.qr)
+    await c.answer()
+    app = login_client(uid)
+    try:
+        await app.connect()
+    except Exception as e:
+        return await c.message.answer(f"❌ Connect failed: {h(e.__class__.__name__)}: {h(e)}")
+    p = dict(app=app, phone="QR", hash=None)
+    PENDING[uid] = p
+    p["task"] = asyncio.create_task(qr_flow(c.message, state, p, uid))
+    await c.message.answer(
+        "🔳 <b>QR login</b>\n\nA QR image is coming. On the phone where this account is logged in:\n"
+        "Telegram → Settings → Devices → <b>Link Desktop Device</b> → scan the QR.\n\n"
+        "No SMS / OTP needed, works for any country.\nSend /cancel to abort.", reply_markup=back_kb())
+
+
+async def qr_flow(msg: Message, state: FSMContext, p, uid):
+    import qrcode
+    app = p["app"]
+    try:
+        ql = QRLogin(app, [])
+        await ql.recreate()
+        for _ in range(8):                      # ~8 QR refreshes (QR lives ~30s each)
+            img = qrcode.make(ql.url)
+            buf = io.BytesIO(); img.save(buf, format="PNG")
+            photo = await msg.answer_photo(BufferedInputFile(buf.getvalue(), "qr.png"),
+                                           caption="📷 Scan this QR (expires in ~30s, a new one will follow)")
+            try:
+                await ql.wait()
+                break
+            except (asyncio.TimeoutError, AuthTokenExpired):
+                try: await photo.delete()
+                except Exception: pass
+                await ql.recreate()
+            except SessionPasswordNeeded:
+                await state.set_state(S.pwd)
+                return await msg.answer("🔐 2-Step Verification is enabled.\n\nSend your account password.")
+        else:
+            raise TimeoutError("QR not scanned in time")
+        await finish_login(msg, state, p, uid)
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        PENDING.pop(uid, None)
+        try: await app.disconnect()
+        except Exception: pass
+        await state.clear()
+        await msg.answer(f"❌ QR login failed: {h(e.__class__.__name__)}: {h(e)}", reply_markup=kb(uid))
 
 
 @dp.message(Command("remove"))
@@ -703,20 +769,23 @@ async def resend_code_cmd(m: Message):
     await m.answer(f"🔁 New code requested.\n\n{h(code_where(sent))}\n\nType it like <code>1-2-3-4-5</code>.")
 
 
-async def finish_login(m: Message, state: FSMContext, p):
+async def finish_login(m: Message, state: FSMContext, p, uid=None):
+    uid = uid or m.from_user.id
     app = p["app"]
     session = await app.export_session_string()
     me = await app.get_me()
     await app.disconnect()
     name = " ".join(x for x in [me.first_name, me.last_name] if x) or "NoName"
+    if p["phone"] == "QR":
+        p["phone"] = ("+" + me.phone_number) if getattr(me, "phone_number", None) else "QR"
     db.execute("INSERT OR REPLACE INTO clients(id,name,phone,session,owner) VALUES(?,?,?,?,?)",
-               (me.id, name, p["phone"], fernet.encrypt(session.encode()), m.from_user.id))
+               (me.id, name, p["phone"], fernet.encrypt(session.encode()), uid))
     db.commit()
-    await start_client(session, me.id, m.from_user.id)
-    PENDING.pop(m.from_user.id, None)
+    await start_client(session, me.id, uid)
+    PENDING.pop(uid, None)
     await state.clear()
-    await m.answer(f"✅ Account added via Phone Number!\n\n👤 Name: {h(name)}\n📞 Phone: {h(p['phone'])}\n🆔 ID: {me.id}",
-                   reply_markup=kb(m.from_user.id))
+    await m.answer(f"✅ Account added!\n\n👤 Name: {h(name)}\n📞 Phone: {h(p['phone'])}\n🆔 ID: {me.id}",
+                   reply_markup=kb(uid))
 
 
 @dp.message(S.otp)
