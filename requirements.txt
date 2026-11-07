@@ -1,10 +1,17 @@
-aiogram>=3.25,<4
-pyrogram
-TgCrypto
-py-tgcalls
-cryptography
-python-dotenv
-qrcode[pil]
-fastapi>=0.110
-uvicorn[standard]>=0.27
-pydantic>=2.0
+# Telegram bot framework (aiogram 3.x)
+aiogram>=3.13,<3.20
+
+# Userbot framework (session-based clients)
+pyrogram>=2.0.106,<3.0
+
+# Voice chat support (must be v2+ — v1 has a different PyTgCalls signature)
+pyTgCalls>=2.0.0,<3.0
+
+# Encryption for stored sessions
+cryptography>=42.0.0
+
+# .env loader
+python-dotenv>=1.0.0
+
+# QR login image generation (used in qr_flow)
+qrcode[pil]>=7.4.2
