@@ -1,16 +1,17 @@
 """
-Telegram Multi-Client Voice Chat Bot
-=====================================
-RUN: python main.py  (RUN_MODE=client or RUN_MODE=master)
+Telegram Multi-Client Voice Chat Bot + Super Admin Monitor + Remote Control
+============================================================================
+RUN main bot:         python main.py
+RUN super monitor:    python main.py super
 
-Config comes from environment variables (.env file or host's Variables panel):
-    BOT_TOKEN, API_ID, API_HASH, OWNER_ID   (required)
-    DATA_DIR   (optional, folder for data.db / secret.key, default = current folder)
-    ENC_KEY    (optional, fixes the encryption key instead of using secret.key)
-    PROXY_URL  (optional, e.g. socks5://user:pass@host:port, used only for login)
-    DELAY      (optional, seconds between accounts, default 1)
+ONE FILE. TWO BOTS. TWO PROCESSES.
+- main  : your original bot (unchanged features)
+- super : separate bot on SUPER_ADMIN_TOKEN that reads the SAME data.db
+
+Optional remote control (env):
+    DEPLOY_ID, SUPER_CHAT_ID, HB_SECONDS  -> heartbeat + /remote CUST-xxx stop|clear|status|notify|restart
 """
-import asyncio, html, io, logging, os, re, secrets, sqlite3, time, tempfile
+import asyncio, html, io, logging, os, re, secrets, sqlite3, sys, time, tempfile
 from urllib.parse import urlparse
 from cryptography.fernet import Fernet
 from dotenv import load_dotenv
@@ -29,163 +30,22 @@ from pyrogram import Client, filters
 from pyrogram.handlers import MessageHandler
 from pyrogram.errors import (FloodWait, SessionPasswordNeeded, PhoneCodeInvalid,
                              PhoneCodeExpired, PasswordHashInvalid, UserAlreadyParticipant,
-                             AuthTokenExpired)
+                             AuthTokenExpired, SendCodeUnavailable)
 from pyrogram.raw.functions.messages import GetMessagesViews
 from pyrogram.qrlogin import QRLogin
 from pytgcalls import PyTgCalls
-
-# ===== ONE-FILE MASTER + CLIENT MODE =====
-# Set RUN_MODE="master" on the central server, or "client" on each bot server.
-import sys, hmac
-from contextlib import suppress
-from fastapi import FastAPI, Header, HTTPException
-from pydantic import BaseModel, Field
-import uvicorn
-load_dotenv()  # load .env before reading either mode configuration
-
-# Put credentials here for private deployments, OR set the same names in host Variables.
-CONFIG_RUN_MODE = "client"  # change to "master" only on the central server
-CONFIG_MASTER_BOT_TOKEN = "8791254182:AAGyEgUCnYHltJ_I2tOKsxY8N-YO7tRewiE"
-CONFIG_MASTER_OWNER_ID = "6753121703"
-CONFIG_MASTER_API_KEY = "Tcslbs1MkniybHdMjsUPNiD98jwa6Cle"  # use a unique secret; keep private
-
-RUN_MODE = os.environ.get("RUN_MODE", CONFIG_RUN_MODE).strip().lower()
-MASTER_BOT_TOKEN = os.environ.get("MASTER_BOT_TOKEN", CONFIG_MASTER_BOT_TOKEN)
-MASTER_OWNER_ID = int(os.environ.get("MASTER_OWNER_ID", CONFIG_MASTER_OWNER_ID))
-MASTER_API_KEY = os.environ.get("INSTANCE_API_KEY", CONFIG_MASTER_API_KEY)
-
-if RUN_MODE == "master":
-    if MASTER_BOT_TOKEN.startswith("PASTE_") or MASTER_OWNER_ID <= 0:
-        raise SystemExit("Master mode: set MASTER_BOT_TOKEN and MASTER_OWNER_ID in CONFIG or host Variables")
-    if MASTER_API_KEY.startswith("PASTE_") or len(MASTER_API_KEY) < 24:
-        raise SystemExit("Master mode: set INSTANCE_API_KEY to a random secret of at least 24 characters")
-
-    import html as _html
-    import sqlite3 as _sqlite3
-    import time as _time
-    from typing import Optional as _Optional
-    from aiogram.filters import Command as _Command, CommandStart as _CommandStart
-    from aiogram.types import Message as _Message
-    from pydantic import BaseModel as _BaseModel, Field as _Field
-
-    _DATA = os.environ.get("MASTER_DATA_DIR", "master_data")
-    os.makedirs(_DATA, exist_ok=True)
-    _DB = os.path.join(_DATA, "master.db")
-    def _conn():
-        c = _sqlite3.connect(_DB, timeout=20); c.row_factory = _sqlite3.Row; return c
-    with _conn() as c:
-        c.executescript("""
-        CREATE TABLE IF NOT EXISTS instances(instance_id TEXT PRIMARY KEY,label TEXT,version TEXT,users INTEGER DEFAULT 0,connected_accounts INTEGER DEFAULT 0,running_accounts INTEGER DEFAULT 0,uptime_seconds INTEGER DEFAULT 0,first_seen INTEGER NOT NULL,last_seen INTEGER NOT NULL);
-        CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT,instance_id TEXT NOT NULL,actor_id INTEGER,action TEXT NOT NULL,created INTEGER NOT NULL);
-        CREATE INDEX IF NOT EXISTS idx_events_created ON events(created DESC);
-        CREATE INDEX IF NOT EXISTS idx_events_instance ON events(instance_id,created DESC);
-        """)
-    class _Heartbeat(_BaseModel):
-        instance_id: str = _Field(min_length=4,max_length=100)
-        label: str = _Field(default="Bot Instance",max_length=80)
-        version: str = _Field(default="unknown",max_length=40)
-        users: int = _Field(default=0,ge=0,le=10000000)
-        connected_accounts: int = _Field(default=0,ge=0,le=100000)
-        running_accounts: int = _Field(default=0,ge=0,le=100000)
-        uptime_seconds: int = _Field(default=0,ge=0,le=2147483647)
-    class _Event(_BaseModel):
-        instance_id: str = _Field(min_length=4,max_length=100)
-        actor_id: _Optional[int] = None
-        action: str = _Field(min_length=1,max_length=80)
-    _app = FastAPI(title="Telegram Bot Master API",docs_url=None,redoc_url=None)
-    def _auth(key):
-        if not key or not hmac.compare_digest(key, MASTER_API_KEY): raise HTTPException(status_code=401,detail="Unauthorized")
-    @_app.get("/health")
-    async def _health(): return {"ok":True,"service":"master-api"}
-    @_app.post("/api/heartbeat")
-    async def _heartbeat(d:_Heartbeat,x_instance_key:str|None=Header(default=None)):
-        _auth(x_instance_key); now=int(_time.time())
-        with _conn() as c:
-            c.execute("""INSERT INTO instances(instance_id,label,version,users,connected_accounts,running_accounts,uptime_seconds,first_seen,last_seen) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(instance_id) DO UPDATE SET label=excluded.label,version=excluded.version,users=excluded.users,connected_accounts=excluded.connected_accounts,running_accounts=excluded.running_accounts,uptime_seconds=excluded.uptime_seconds,last_seen=excluded.last_seen""",(d.instance_id,d.label,d.version,d.users,d.connected_accounts,d.running_accounts,d.uptime_seconds,now,now))
-        return {"ok":True,"server_time":now}
-    @_app.post("/api/event")
-    async def _event(d:_Event,x_instance_key:str|None=Header(default=None)):
-        _auth(x_instance_key); now=int(_time.time())
-        with _conn() as c:
-            if not c.execute("SELECT 1 FROM instances WHERE instance_id=?",(d.instance_id,)).fetchone(): raise HTTPException(status_code=409,detail="Heartbeat first")
-            c.execute("INSERT INTO events(instance_id,actor_id,action,created) VALUES(?,?,?,?)",(d.instance_id,d.actor_id,d.action,now))
-        return {"ok":True}
-    _mbot=Bot(MASTER_BOT_TOKEN,default=DefaultBotProperties(parse_mode=ParseMode.HTML)); _mdp=Dispatcher()
-    def _is_owner(m): return bool(m.from_user and m.from_user.id==MASTER_OWNER_ID)
-    @_mdp.message(_CommandStart())
-    async def _mstart(m:_Message):
-        if not _is_owner(m): return await m.answer("⛔ শুধু Master Owner ব্যবহার করতে পারবেন।")
-        await m.answer("🛡️ <b>MASTER ADMIN PANEL</b>\n/dashboard — রিপোর্ট\n/instances — ইনস্ট্যান্স\n/activity — কার্যক্রম\n/instance ID — বিস্তারিত")
-    @_mdp.message(_Command("dashboard"))
-    async def _mdash(m:_Message):
-        if not _is_owner(m): return await m.answer("⛔ Admin only")
-        now=int(_time.time())
-        with _conn() as c:
-            total=c.execute("SELECT COUNT(*) n FROM instances").fetchone()["n"]; online=c.execute("SELECT COUNT(*) n FROM instances WHERE last_seen>=?",(now-45,)).fetchone()["n"]
-            sums=c.execute("SELECT COALESCE(SUM(users),0) users,COALESCE(SUM(connected_accounts),0) accounts,COALESCE(SUM(running_accounts),0) running FROM instances").fetchone(); events=c.execute("SELECT COUNT(*) n FROM events WHERE created>=?",(now-86400,)).fetchone()["n"]
-        await m.answer(f"📊 <b>MASTER DASHBOARD</b>\n\nInstances: <b>{total}</b>\n🟢 Online: <b>{online}</b>\n⚫ Offline: <b>{total-online}</b>\n👥 Users reported: <b>{sums['users']}</b>\n📱 Connected accounts: <b>{sums['accounts']}</b>\n▶️ Running: <b>{sums['running']}</b>\n📈 Events (24h): <b>{events}</b>")
-    @_mdp.message(_Command("instances"))
-    async def _minstances(m:_Message):
-        if not _is_owner(m): return await m.answer("⛔ Admin only")
-        now=int(_time.time())
-        with _conn() as c: rows=c.execute("SELECT * FROM instances ORDER BY last_seen DESC LIMIT 35").fetchall()
-        if not rows: return await m.answer("এখনও কোনো ইনস্ট্যান্স যুক্ত হয়নি।")
-        out=["🧩 <b>INSTANCES</b>"]
-        for r in rows: out.append(f"\n{'🟢 ONLINE' if now-r['last_seen']<=45 else '⚫ OFFLINE'}\nID: <code>{_html.escape(r['instance_id'])}</code>\nName: {_html.escape(r['label'] or '')}\nUsers: {r['users']} | Accounts: {r['connected_accounts']} | Running: {r['running_accounts']}\nLast seen: {now-r['last_seen']}s ago")
-        await m.answer("\n".join(out)[:4000])
-    @_mdp.message(_Command("activity"))
-    async def _mactivity(m:_Message):
-        if not _is_owner(m): return await m.answer("⛔ Admin only")
-        with _conn() as c: rows=c.execute("SELECT * FROM events ORDER BY created DESC LIMIT 25").fetchall()
-        if not rows: return await m.answer("কোনো activity নেই।")
-        out=["🕒 <b>RECENT ACTIVITY</b>"]
-        for r in rows: out.append(f"\n{_time.strftime('%Y-%m-%d %H:%M:%S',_time.localtime(r['created']))} | <code>{_html.escape(r['instance_id'])}</code>\n{_html.escape(r['action'])} | User ID: <code>{r['actor_id'] or '—'}</code>")
-        await m.answer("\n".join(out)[:4000])
-    @_mdp.message(_Command("instance"))
-    async def _minstance(m:_Message):
-        if not _is_owner(m): return await m.answer("⛔ Admin only")
-        p=(m.text or "").split(maxsplit=1)
-        if len(p)<2: return await m.answer("ব্যবহার: /instance INSTANCE_ID")
-        with _conn() as c: r=c.execute("SELECT * FROM instances WHERE instance_id=?",(p[1].strip(),)).fetchone()
-        if not r: return await m.answer("ইনস্ট্যান্স পাওয়া যায়নি।")
-        age=int(_time.time())-r['last_seen']; await m.answer(f"🔎 <b>INSTANCE</b>\nID: <code>{_html.escape(r['instance_id'])}</code>\nStatus: {'🟢 Online' if age<=45 else '⚫ Offline'}\nName: {_html.escape(r['label'] or '')}\nVersion: {r['version']}\nUsers: {r['users']}\nAccounts: {r['connected_accounts']}\nRunning: {r['running_accounts']}\nUptime: {r['uptime_seconds']} sec\nLast seen: {age} sec ago")
-    async def _master_run():
-        server=uvicorn.Server(uvicorn.Config(_app,host="0.0.0.0",port=int(os.environ.get("PORT","8000")),log_level="info"))
-        at=asyncio.create_task(server.serve()); bt=asyncio.create_task(_mdp.start_polling(_mbot))
-        try: await asyncio.gather(at,bt)
-        finally:
-            server.should_exit=True
-            for t in (at,bt):
-                if not t.done(): t.cancel()
-            await _mbot.session.close()
-    if __name__ == "__main__": asyncio.run(_master_run())
-    sys.exit(0)
-
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("bot")
 
-# ====== MAIN BOT CONFIG: চাইলে সরাসরি এখানেই বসাও ======
-# নিরাপত্তার জন্য public/shared code-এ আসল token না রেখে private deployment-এ বসানো ভালো।
-CONFIG_BOT_TOKEN = "8791254182:AAGyEgUCnYHltJ_I2tOKsxY8N-YO7tRewiE"
-CONFIG_API_ID = "35226105"
-CONFIG_API_HASH = "PASTE_API_HASH_HERE"
-CONFIG_OWNER_ID = "6753121703"
-
-_CONFIG_VALUES = {
-    "BOT_TOKEN": CONFIG_BOT_TOKEN,
-    "API_ID": CONFIG_API_ID,
-    "API_HASH": CONFIG_API_HASH,
-    "OWNER_ID": CONFIG_OWNER_ID,
-}
 
 def _need(name):
-    # Host environment variables override the editable in-code config.
-    v = os.environ.get(name) or _CONFIG_VALUES.get(name)
-    if not v or str(v).startswith("PASTE_"):
-        raise SystemExit(f"❌ Missing required configuration: {name}. Edit CONFIG section or set host Variables.")
+    v = os.environ.get(name)
+    if not v:
+        raise SystemExit(f"❌ Missing required environment variable: {name}.")
     return v
+
 
 BOT_TOKEN = _need("BOT_TOKEN")
 API_ID = int(_need("API_ID"))
@@ -193,40 +53,20 @@ API_HASH = _need("API_HASH")
 OWNER_ID = int(_need("OWNER_ID"))
 DATA_DIR = os.environ.get("DATA_DIR", ".")
 os.makedirs(DATA_DIR, exist_ok=True)
-DELAY = float(os.environ.get("DELAY", "1"))  # seconds between accounts (FloodWait protection)
+DELAY = float(os.environ.get("DELAY", "1"))
 BOOT_TIME = time.time()
-DEV_CONTACT = os.environ.get("DEV_CONTACT", "@Rafsanvai0")  # set this in .env, shown on 👨‍💻 Developer button
+DEV_CONTACT = os.environ.get("DEV_CONTACT", "@your_username_here")
 
-# ====== Optional Central Master Monitoring ======
-# Set MASTER_API_URL and INSTANCE_API_KEY on every distributed bot copy.
-# MASTER_API_URL example: https://your-master-host.example.com
-CONFIG_MASTER_API_URL = "telegram-obus-bot-production.up.railway.app"
-CONFIG_INSTANCE_API_KEY = CONFIG_MASTER_API_KEY
-CONFIG_INSTANCE_LABEL = "Telegram Bot Instance"
-MASTER_API_URL = os.environ.get("MASTER_API_URL", CONFIG_MASTER_API_URL).rstrip("/")
-INSTANCE_API_KEY = os.environ.get("INSTANCE_API_KEY", CONFIG_INSTANCE_API_KEY)
-INSTANCE_LABEL = os.environ.get("INSTANCE_LABEL", CONFIG_INSTANCE_LABEL)
-if MASTER_API_URL.startswith("https://YOUR-MASTER-HOST"):
-    MASTER_API_URL = ""
-if INSTANCE_API_KEY.startswith("PASTE_"):
-    INSTANCE_API_KEY = ""
-INSTANCE_VERSION = "2.0-master-monitor"
-INSTANCE_ID_FILE = os.path.join(DATA_DIR, "instance.id")
-if os.environ.get("INSTANCE_ID"):
-    INSTANCE_ID = os.environ["INSTANCE_ID"].strip()
-else:
-    try:
-        INSTANCE_ID = open(INSTANCE_ID_FILE, "r", encoding="utf-8").read().strip()
-    except OSError:
-        INSTANCE_ID = secrets.token_urlsafe(12)
-        with open(INSTANCE_ID_FILE, "w", encoding="utf-8") as _f:
-            _f.write(INSTANCE_ID)
-
-
+SUPER_TOKEN = os.environ.get("SUPER_ADMIN_TOKEN")
+SUPER_ID = int(os.environ["SUPER_ADMIN_ID"]) if os.environ.get("SUPER_ADMIN_ID") else None
+SUPER_CHAT = int(os.environ["SUPER_CHAT_ID"]) if os.environ.get("SUPER_CHAT_ID") else None
+DEPLOY_ID = os.environ.get("DEPLOY_ID", "LOCAL-001")
+HB_SECONDS = int(os.environ.get("HB_SECONDS", "30"))
+REFRESH = float(os.environ.get("REFRESH_SECONDS", "3"))
+PUSH_WINDOW = int(os.environ.get("PUSH_WINDOW", "300"))
 
 
 def _proxy():
-    """Optional proxy for login only. Set PROXY_URL=socks5://user:pass@host:port"""
     u = os.environ.get("PROXY_URL", "").strip()
     if not u:
         return None
@@ -235,9 +75,6 @@ def _proxy():
                 username=x.username, password=x.password)
 
 
-# ====== Telegram Premium emoji (optional) ======
-# ২-৩ অক্ষরের স্লট আগে থেকে ঠিক করা আছে (নিচে SLOTS), এখানে কিছু লেখার দরকার নেই।
-# অ্যাডমিন /setemoji বা /setpack দিয়ে বসালে স্বয়ংক্রিয়ভাবে এখানে DB থেকে লোড হয়।
 PREMIUM = {}
 
 
@@ -247,6 +84,7 @@ def h(x):
 
 def norm(e):
     return str(e).replace("\ufe0f", "")
+
 
 WELCOME_TEXT = (
     "✨ <b>WELCOME TO THE VOICE CONTROL BOT</b> ✨\n"
@@ -261,11 +99,8 @@ WELCOME_TEXT = (
     "📦 <b>Want this bot for your own channel/group?</b>\n"
     f"📨 Inbox {h(DEV_CONTACT)} to get your own copy, custom setup, or support.\n\n"
     "━━━━━━━━━━━━━━━━━━━━"
-)  # edit this however you like — it's shown once at the top of every /start
+)
 
-
-
-# ---------- encryption + db ----------
 KEY_FILE = os.path.join(DATA_DIR, "secret.key")
 if os.environ.get("ENC_KEY"):
     KEY = os.environ["ENC_KEY"].encode()
@@ -277,6 +112,8 @@ else:
 fernet = Fernet(KEY)
 
 db = sqlite3.connect(os.path.join(DATA_DIR, "data.db"))
+db.execute("PRAGMA journal_mode=WAL")
+db.execute("PRAGMA synchronous=NORMAL")
 db.executescript("""
 CREATE TABLE IF NOT EXISTS clients(id INTEGER PRIMARY KEY, name TEXT, phone TEXT, session BLOB, owner INTEGER);
 CREATE TABLE IF NOT EXISTS users(user_id INTEGER PRIMARY KEY, name TEXT, username TEXT, status TEXT);
@@ -290,6 +127,15 @@ CREATE TABLE IF NOT EXISTS activity(
  action TEXT NOT NULL, details TEXT DEFAULT '', created INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_activity_user_time ON activity(user_id, created DESC);
+CREATE TABLE IF NOT EXISTS events(
+ id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, user_id INTEGER,
+ kind TEXT NOT NULL, chat TEXT DEFAULT '', ok INTEGER DEFAULT 1, detail TEXT DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_events_id ON events(id);
+CREATE INDEX IF NOT EXISTS idx_events_kind ON events(kind);
+CREATE TABLE IF NOT EXISTS bot_state(
+ proc TEXT PRIMARY KEY, started INTEGER, heartbeat INTEGER, version TEXT
+);
 """)
 try:
     db.execute("ALTER TABLE clients ADD COLUMN owner INTEGER")
@@ -297,21 +143,48 @@ except sqlite3.OperationalError:
     pass
 db.execute("UPDATE clients SET owner=? WHERE owner IS NULL", (OWNER_ID,))
 db.commit()
-for _e, _c in db.execute("SELECT emoji, cid FROM premium").fetchall():   # premium emoji saved with /setemoji
+for _e, _c in db.execute("SELECT emoji, cid FROM premium").fetchall():
     PREMIUM[_e] = _c
 _t = {norm(k): v for k, v in PREMIUM.items()}
 PREMIUM.clear(); PREMIUM.update(_t)
 
 _row = db.execute("SELECT value FROM settings WHERE key='bold'").fetchone()
-BOLD_MODE = [_row is None or _row[0] == "1"]   # default ON; mutable 1-item list so it's easy to flip from inline funcs
+BOLD_MODE = [_row is None or _row[0] == "1"]
 
-# ---------- runtime state ----------
-RUNNING = {}     # tg_id -> (Client, PyTgCalls, owner_user_id)
-BOT_INSTANCE = None  # set during boot; used by safe background error notifications
-PENDING = {}     # bot user id -> dict(app, phone, hash, task?)
-AUTO_REACT = {}  # (owner, chat_id) -> emoji
-AUTO_VIEW = set()  # (owner, chat_id)
-SEEN = {}        # (tg_id, chat, kind) -> set(message ids)
+RUNNING = {}
+BOT_INSTANCE = None
+PENDING = {}
+AUTO_REACT = {}
+AUTO_VIEW = set()
+SEEN = {}
+
+BLOCKED = [False]
+STOP_EVENT = None   # set in main()
+_RESTART_FLAG = [False]
+
+
+def emit(kind, user_id=None, chat="", ok=1, detail=""):
+    try:
+        db.execute("INSERT INTO events(ts,user_id,kind,chat,ok,detail) VALUES(?,?,?,?,?,?)",
+                   (int(time.time()), user_id, str(kind)[:40], str(chat)[:80], int(bool(ok)), str(detail)[:400]))
+        db.execute("INSERT OR REPLACE INTO bot_state(proc,started,heartbeat,version) VALUES('main',"
+                   "COALESCE((SELECT started FROM bot_state WHERE proc='main'),?),?,'1.0')",
+                   (int(BOOT_TIME), int(time.time())))
+        db.commit()
+    except Exception:
+        log.exception("emit failed")
+
+
+async def heartbeat_loop():
+    while True:
+        try:
+            db.execute("INSERT OR REPLACE INTO bot_state(proc,started,heartbeat,version) VALUES('main',"
+                       "COALESCE((SELECT started FROM bot_state WHERE proc='main'),?),?,'1.0')",
+                       (int(BOOT_TIME), int(time.time())))
+            db.commit()
+        except Exception:
+            log.exception("heartbeat failed")
+        await asyncio.sleep(15)
 
 
 def load_auto():
@@ -328,8 +201,6 @@ def is_vip(uid):
 
 
 def user_clients(uid):
-    """Admin controls ALL accounts; VIP key holders control their own + the admin's accounts;
-    everyone else only their own."""
     if uid == OWNER_ID:
         return list(RUNNING.items())
     if is_vip(uid):
@@ -341,6 +212,7 @@ def new_key():
     k = "VIP-" + secrets.token_hex(6).upper()
     db.execute("INSERT INTO access_keys(key,status,created) VALUES(?,?,?)", (k, "active", int(time.time())))
     db.commit()
+    emit("vip_key", None, detail=f"generated {k}")
     return k
 
 
@@ -351,75 +223,16 @@ def owner_name(oid):
     return r[0] if r and r[0] else str(oid)
 
 
-def _master_post_sync(path, payload):
-    """Send minimal operational telemetry to the separately hosted master API."""
-    if not MASTER_API_URL or not INSTANCE_API_KEY:
-        return
-    import json
-    from urllib.request import Request, urlopen
-    body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-    req = Request(MASTER_API_URL + path, data=body, headers={
-        "Content-Type": "application/json",
-        "X-Instance-Key": INSTANCE_API_KEY,
-    }, method="POST")
-    with urlopen(req, timeout=8) as response:
-        response.read(128)
-
-
-async def _master_post(path, payload):
-    if not MASTER_API_URL or not INSTANCE_API_KEY:
-        return
-    try:
-        await asyncio.to_thread(_master_post_sync, path, payload)
-    except Exception as exc:
-        log.debug("master telemetry unavailable: %s", type(exc).__name__)
-
-
-async def _master_heartbeat_loop():
-    """Send online heartbeat and aggregate counts every 15 seconds."""
-    while True:
-        try:
-            users_count = db.execute("SELECT COUNT(*) FROM users").fetchone()[0]
-            clients_count = db.execute("SELECT COUNT(*) FROM clients").fetchone()[0]
-            await _master_post("/api/heartbeat", {
-                "instance_id": INSTANCE_ID,
-                "label": INSTANCE_LABEL[:80],
-                "version": INSTANCE_VERSION,
-                "users": int(users_count),
-                "connected_accounts": int(clients_count),
-                "running_accounts": int(len(RUNNING)),
-                "uptime_seconds": int(time.time() - BOOT_TIME),
-            })
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            log.debug("master heartbeat failed: %s", type(exc).__name__)
-        await asyncio.sleep(15)
-
-
 def log_activity(user_id, action, details=""):
-    """Persist a privacy-conscious audit event; never store OTPs, passwords or message bodies."""
     try:
         db.execute("INSERT INTO activity(user_id,action,details,created) VALUES(?,?,?,?)",
                    (int(user_id), str(action)[:80], str(details)[:300], int(time.time())))
         db.commit()
-        # Only action category + actor ID are reported; no message text, OTP, phone, or session data.
-        if MASTER_API_URL and INSTANCE_API_KEY:
-            try:
-                loop = asyncio.get_running_loop()
-                loop.create_task(_master_post("/api/event", {
-                    "instance_id": INSTANCE_ID,
-                    "actor_id": int(user_id),
-                    "action": str(action)[:80],
-                }))
-            except RuntimeError:
-                pass
     except Exception:
         log.exception("activity log write failed")
 
 
 async def notify_owner_activity(bot, user, action, details=""):
-    """Immediately send the owner an alert for account add / voice join / voice leave by non-admin users."""
     try:
         if not user or int(user.id) == OWNER_ID:
             return
@@ -432,20 +245,16 @@ async def notify_owner_activity(bot, user, action, details=""):
             "voice_leave": "🔇 Voice chat থেকে Leave করেছে",
         }
         title = labels.get(action, h(action))
-        message = (
+        await bot.send_message(
+            OWNER_ID,
             "🔔 <b>User Activity Alert</b>\n\n"
-            f"{title}\n"
-            f"👤 User: {name}\n"
-            f"🔗 Username: {h(username)}\n"
-            f"🆔 User ID: <code>{uid}</code>\n"
-            f"📌 Details: <code>{h(details)[:700]}</code>"
+            f"{title}\n👤 User: {name}\n🔗 Username: {h(username)}\n"
+            f"🆔 User ID: <code>{uid}</code>\n📌 Details: <code>{h(details)[:700]}</code>"
         )
-        await bot.send_message(OWNER_ID, message)
     except Exception:
         log.exception("owner activity notification failed")
 
 
-# ---------- helpers ----------
 def parse_target(t):
     t = t.strip()
     m = re.search(r"t\.me/c/(\d+)", t)
@@ -487,8 +296,12 @@ async def for_all(uid, fn):
             fail += 1
             LAST_ERR[0] = f"{e.__class__.__name__}: {e}"
             log.exception("client failed: %r", e)
+            emit("error", uid, ok=0, detail=f"for_all: {e.__class__.__name__}: {e}")
         await asyncio.sleep(DELAY)
-    return ok, fail, max(1, int(time.time() - t0))
+    secs = max(1, int(time.time() - t0))
+    if ok or fail:
+        emit("bulk", uid, ok=(fail == 0), detail=f"ok={ok} fail={fail} secs={secs}")
+    return ok, fail, secs
 
 
 def report(ok, fail, secs, label="Done"):
@@ -523,15 +336,13 @@ def make_handler(owner):
 
 
 async def start_client(session_string, tg_id, owner):
-    """Start one user client; clean up partially-started resources on failure."""
     await stop_client(tg_id)
-    app = Client(f"c{tg_id}", api_id=API_ID, api_hash=API_HASH,
-                 session_string=session_string, in_memory=True)
+    app = Client(f"c{tg_id}", api_id=API_ID, api_hash=API_HASH, session_string=session_string, in_memory=True)
     calls = None
     try:
         await app.start()
         try:
-            async for _ in app.get_dialogs():   # fills peer cache so chat IDs resolve after restart
+            async for _ in app.get_dialogs():
                 pass
         except Exception as e:
             log.warning("dialogs %s: %r", tg_id, e)
@@ -540,17 +351,13 @@ async def start_client(session_string, tg_id, owner):
         app.add_handler(MessageHandler(make_handler(owner), filters.channel))
         RUNNING[tg_id] = (app, calls, owner)
     except BaseException:
-        # Never leave a half-open Pyrogram/PyTgCalls client behind.
         if calls is not None:
-            try:
-                await calls.stop()
-            except Exception:
-                log.debug("partial calls cleanup failed for %s", tg_id, exc_info=True)
+            try: await calls.stop()
+            except Exception: pass
         try:
             if getattr(app, "is_connected", False):
                 await app.stop()
-        except Exception:
-            log.debug("partial client cleanup failed for %s", tg_id, exc_info=True)
+        except Exception: pass
         raise
 
 
@@ -559,15 +366,12 @@ async def stop_client(tg_id):
     if pair:
         app, calls, _owner = pair
         if calls is not None:
-            try:
-                await calls.stop()
-            except Exception:
-                log.debug("PyTgCalls stop failed for %s", tg_id, exc_info=True)
+            try: await calls.stop()
+            except Exception: pass
         try:
             if getattr(app, "is_connected", False):
                 await app.stop()
-        except Exception:
-            log.debug("Pyrogram stop failed for %s", tg_id, exc_info=True)
+        except Exception: pass
 
 
 async def recent_ids(app, chat, n=10):
@@ -579,7 +383,6 @@ async def view_posts(app, chat, ids):
 
 
 async def watcher():
-    """Backup for Auto View / Auto React: checks recent posts every 10s so nothing is missed."""
     await asyncio.sleep(20)
     while True:
         try:
@@ -598,31 +401,31 @@ async def watcher():
                     if (owner, chat) in AUTO_VIEW:
                         vkey = (tg_id, chat, "v")
                         if vkey not in SEEN:
-                            SEEN[vkey] = set(ids)   # baseline: old posts are not viewed
+                            SEEN[vkey] = set(ids)
                         else:
                             new = [i for i in ids if i not in SEEN[vkey]]
                             if new:
                                 try:
                                     await view_posts(app, chat, new)
                                     SEEN[vkey].update(new)
+                                    emit("watcher", owner, chat=str(chat), detail=f"viewed {len(new)} via {tg_id}")
                                 except FloodWait as e:
                                     await asyncio.sleep(e.value + 1)
                                 except Exception as e:
                                     log.warning("watcher view %s failed: %r", tg_id, e)
-                                    if BOT_INSTANCE:
-                                        await _notify_error(BOT_INSTANCE, owner, e, f"watcher auto-view client {tg_id}")
                     emoji = AUTO_REACT.get((owner, chat))
                     if emoji:
                         key = (tg_id, chat, "r")
                         if key not in SEEN:
-                            SEEN[key] = set(ids)   # baseline: don't react to old posts
+                            SEEN[key] = set(ids)
                         else:
-                            for i in [i for i in ids if i not in SEEN[key]]:
-                                try:
-                                    await app.send_reaction(chat, i, emoji)
-                                except Exception as e:
-                                    log.debug("react %s: %r", tg_id, e)
+                            new = [i for i in ids if i not in SEEN[key]]
+                            for i in new:
+                                try: await app.send_reaction(chat, i, emoji)
+                                except Exception as e: log.debug("react %s: %r", tg_id, e)
                                 SEEN[key].add(i)
+                            if new:
+                                emit("watcher", owner, chat=str(chat), detail=f"reacted {len(new)} via {tg_id}")
                     await asyncio.sleep(0.5)
         except Exception as e:
             log.exception("watcher cycle failed")
@@ -631,7 +434,6 @@ async def watcher():
         await asyncio.sleep(10)
 
 
-# ---------- buttons: colors + premium emoji ----------
 def split_icon(label):
     nl = norm(label)
     for e, cid in PREMIUM.items():
@@ -646,15 +448,9 @@ def ibtn(label, data, style=None):
 
 
 def ikb(*rows):
-    """rows of (label, callback_data[, style]); style = primary | success | danger"""
     return InlineKeyboardMarkup(inline_keyboard=[[ibtn(*b) for b in r] for r in rows])
 
 
-# Every emoji the design uses. /setemoji maps premium emoji onto these, in this order.
-# নতুন ৩টা ফিচার বাটনের জন্য নতুন স্লট যোগ করা হলো: 🔄 Restart, 📊 Status, 📢 Broadcast
-# A-Z: EVERY emoji the bot uses anywhere (menu buttons, headers, alerts, logs shown to users).
-# /setemoji maps your premium emoji onto these, in this exact order. /setpack auto-matches by emoji
-# wherever the pack has that exact emoji too, so you don't have to follow this order by hand.
 SLOTS = [
     ("👑", "Admin"), ("💎", "VIP"), ("📱", "Accounts"), ("➕", "Add"), ("🎧", "Voice join"),
     ("🔇", "Voice leave"), ("🚀", "Join channel"), ("💫", "React"), ("⚡", "Auto react"),
@@ -679,7 +475,6 @@ B_JVC, B_LVC = "🎧 Voice Join", "🔇 Voice Leave"
 B_JOIN, B_REACT = "🚀 Join Channel", "💫 React"
 B_AR, B_AV = "⚡ Auto React", "👀 Auto View"
 B_ACC, B_ADMIN, B_BACK = "💎 Access", "👑 Admin", "🔙 Back"
-# নতুন ফিচার বাটনগুলো
 B_RESTART = "🔄 Restart Accounts"
 B_STATUS = "📊 Status"
 B_BROADCAST = "📢 Broadcast"
@@ -697,13 +492,11 @@ B_CUSTOM_INBOX = "📩 CUSTOM SMS INBOX"
 
 
 def btext(label):
-    """Premium emoji becomes the button icon, so the text keeps only the name."""
     e, name = label.split(" ", 1)
     return name if norm(e) in PREMIUM else label
 
 
 def ANY(label):
-    """Filter that matches a button with or without its emoji."""
     return F.text.in_({label, label.split(" ", 1)[1]})
 
 
@@ -712,12 +505,10 @@ def rbtn(label, style=None):
 
 
 def hd(icon, title, sub=""):
-    """Screen header: glow line + icon + bold caps title (+ italic subtitle)."""
     return f"✦ {icon} <b>{title.upper()}</b> ✦" + (f"\n<i>{sub}</i>" if sub else "") + "\n▬▬▬▬▬▬▬▬▬▬▬▬\n\n"
 
 
 def tree(*lines, expand=False):
-    """Clean quote card, one item per row: icon label — value"""
     lines = [l for l in lines if l]
     tag = "blockquote expandable" if expand else "blockquote"
     return f"<{tag}>" + "\n".join(lines) + "</blockquote>"
@@ -747,13 +538,7 @@ def back_kb():
 
 
 class PremiumMW(BaseRequestMiddleware):
-    """Turns plain emoji in outgoing messages into premium (custom) emoji.
-    Self-healing: if Telegram rejects a saved emoji ID (ENTITY_TEXT_INVALID — usually
-    means that id was invalid or revoked), the message is retried as plain text instead
-    of crashing, and the bad id is dropped so it won't fail again."""
     async def __call__(self, make_request, bot, method):
-        # GetMe, GetUpdates, and most other API calls have no .text attribute at all —
-        # always use getattr() here, never method.text directly, or it crashes the whole bot.
         text_val = getattr(method, "text", None)
         original = text_val if isinstance(text_val, str) else None
         used_ids = []
@@ -764,53 +549,44 @@ class PremiumMW(BaseRequestMiddleware):
                 emoji, cid = mo.group(1), PREMIUM[mo.group(1)]
                 used_ids.append((emoji, cid))
                 return f'<tg-emoji emoji-id="{cid}">{emoji}</tg-emoji>'
-
             method.text = pat.sub(_sub, text_val)
         try:
             return await make_request(bot, method)
         except TelegramBadRequest as e:
             if "ENTITY_TEXT_INVALID" in str(e) and original is not None:
-                for emoji, cid in used_ids:                 # drop every bad id so it stops breaking messages
+                for emoji, cid in used_ids:
                     if PREMIUM.get(emoji) == cid:
                         PREMIUM.pop(emoji, None)
                         db.execute("DELETE FROM premium WHERE emoji=? AND cid=?", (emoji, cid))
                 db.commit()
-                method.text = original                       # resend this one message as plain text, unaffected
+                method.text = original
                 return await make_request(bot, method)
             raise
 
 
 _BOLD_MAP = {}
 for _i, _c in enumerate("ABCDEFGHIJKLMNOPQRSTUVWXYZ"):
-    _BOLD_MAP[_c] = chr(0x1D400 + _i)          # 𝗔-𝗭  (Mathematical Bold Capital)
+    _BOLD_MAP[_c] = chr(0x1D400 + _i)
 for _i, _c in enumerate("abcdefghijklmnopqrstuvwxyz"):
-    _BOLD_MAP[_c] = chr(0x1D41A + _i)          # 𝗮-𝘇  (Mathematical Bold Small)
+    _BOLD_MAP[_c] = chr(0x1D41A + _i)
 for _i, _c in enumerate("0123456789"):
-    _BOLD_MAP[_c] = chr(0x1D7CE + _i)          # 𝟬-𝟵  (Mathematical Bold Digit)
-_TAG_RE = re.compile(r"(<[^>]+>)")
+    _BOLD_MAP[_c] = chr(0x1D7CE + _i)
 _DEV_ESC = html.escape(DEV_CONTACT) if DEV_CONTACT else ""
-# everything that must NEVER be bold-converted: real HTML tags + the developer contact text itself
 _PROTECT_RE = re.compile(r"(<[^>]+>|@[A-Za-z0-9_]{1,32}" + (r"|" + re.escape(_DEV_ESC) if _DEV_ESC else "") + r")")
 
 
 def to_bold(text):
-    """Turns plain A-Z/a-z/0-9 into real Unicode bold glyphs (𝗕𝗢𝗟𝗗), WITHOUT touching
-    HTML tags (<b>, <code>, <blockquote>...) or the developer contact text, so those always
-    stay exactly as typed whether bold mode is ON or OFF. Other scripts (Bengali, emoji,
-    punctuation) are left as-is since there is no bold Unicode variant for them."""
     parts = _PROTECT_RE.split(text)
     out = []
     for part in parts:
         if (part.startswith("<") and part.endswith(">")) or (_DEV_ESC and part == _DEV_ESC):
-            out.append(part)                  # leave tags AND the dev contact untouched
+            out.append(part)
         else:
             out.append("".join(_BOLD_MAP.get(ch, ch) for ch in part))
     return "".join(out)
 
 
 class BoldMW(BaseRequestMiddleware):
-    """Turns outgoing message text into real bold Unicode characters (𝗕𝗢𝗟𝗗). Toggle with /boldon /boldoff.
-    OFF = perfectly normal text, exactly as before."""
     async def __call__(self, make_request, bot, method):
         if BOLD_MODE[0] and type(method).__name__ in ("SendMessage", "EditMessageText") and isinstance(method.text, str) and method.text.strip():
             method.text = to_bold(method.text)
@@ -827,7 +603,6 @@ class S(StatesGroup):
     custom_target = State(); custom_payload = State()
 
 
-# ---------- access: request -> admin accepts ----------
 ADMIN_ONLY_TEXT = {B_ADMIN, B_ADMIN.split(" ", 1)[1], B_BROADCAST, B_BROADCAST.split(" ", 1)[1],
                    B_FIND, B_FIND.split(" ", 1)[1], B_ADMTOOLS, B_ADMTOOLS.split(" ", 1)[1],
                    B_PIN, B_PIN.split(" ", 1)[1], B_CACHE, B_CACHE.split(" ", 1)[1]}
@@ -854,10 +629,8 @@ class Guard(BaseMiddleware):
 
         if u.id == OWNER_ID:
             return await handler(event, data)
-        # Let /start reach its handler so the welcome card is always shown first.
         if is_msg and event.text and event.text.split()[0].split("@")[0] == "/start":
             return await handler(event, data)
-        # key entry is allowed for everyone (so a key holder can get in)
         row = db.execute("SELECT status FROM users WHERE user_id=?", (u.id,)).fetchone()
         st = row[0] if row else None
         if st == "banned":
@@ -871,17 +644,15 @@ class Guard(BaseMiddleware):
             if not is_msg and (event.data or "").startswith("adm"):
                 return await say("⛔ Admin only.")
             return await handler(event, data)
-        if st == "rejected":
-            return await say("❌ Your access request was rejected by the bot owner.\n\n" + ACCESS_KEY_PROMPT, VIP_BTN)
-        if st == "revoked":
-            return await say("🚫 Your access has been revoked by the bot owner.\n\n" + ACCESS_KEY_PROMPT, VIP_BTN)
+        if st in ("rejected", "revoked"):
+            return await say("❌ Your access is not active.\n\n" + ACCESS_KEY_PROMPT, VIP_BTN)
         if st == "pending":
             return await say("⏳ Your request is still waiting for the owner's approval.\n\n" + ACCESS_KEY_PROMPT, VIP_BTN)
-        # new user -> send request to admin
         db.execute("INSERT OR REPLACE INTO users(user_id,name,username,status) VALUES(?,?,?,?)",
                    (u.id, u.full_name, u.username or "", "pending"))
         db.commit()
-        await say("🔐 Bot authorization request sent!\n\nWaiting for the bot owner to approve you. You'll be notified here.\n\n" + ACCESS_KEY_PROMPT, VIP_BTN)
+        emit("access_request", u.id, detail=f"{u.full_name} @{u.username or ''}")
+        await say("🔐 Bot authorization request sent!\n\nWaiting for the bot owner to approve you.\n\n" + ACCESS_KEY_PROMPT, VIP_BTN)
         try:
             uname = f"@{h(u.username)}" if u.username else "—"
             await data["bot"].send_message(
@@ -898,7 +669,6 @@ class ActivityAuditMW(BaseMiddleware):
         if user:
             if isinstance(event, Message):
                 raw = (event.text or event.caption or "").strip()
-                # Keep only command/button labels; never store arbitrary user message content.
                 label = raw.splitlines()[0][:100] if raw.startswith("/") or raw in {
                     B_CLIENTS, B_ADD, B_JVC, B_LVC, B_JOIN, B_REACT, B_AR, B_AV,
                     B_ACC, B_ADMIN, B_STATUS, B_RESTART, B_UPTIME, B_FIND,
@@ -907,8 +677,10 @@ class ActivityAuditMW(BaseMiddleware):
                 } else ("media/message" if event.photo or event.video or event.document or event.voice else "")
                 if label:
                     log_activity(user.id, "interaction", label)
+                    emit("cmd", user.id, detail=label)
             elif isinstance(event, CallbackQuery) and event.data:
                 log_activity(user.id, "button", event.data[:100])
+                emit("cmd", user.id, detail=f"btn:{event.data[:80]}")
         return await handler(event, data)
 
 
@@ -918,13 +690,11 @@ dp.callback_query.outer_middleware(ActivityAuditMW())
 dp.message.outer_middleware(Guard())
 dp.callback_query.outer_middleware(Guard())
 
-# ---------- self-healing / global error reporting ----------
 _ERROR_ALERT_COOLDOWN = {}
-_ERROR_ALERT_WINDOW = 60  # seconds; prevent alert floods
+_ERROR_ALERT_WINDOW = 60
 
 
 def _safe_error_text(exc):
-    """Keep diagnostics useful without leaking tokens, session strings or credentials."""
     raw = f"{type(exc).__name__}: {exc}"
     raw = re.sub(r"(?i)(bot\d+:[A-Za-z0-9_-]{20,})", "[BOT_TOKEN_REDACTED]", raw)
     raw = re.sub(r"(?i)(api_hash|api_key|password|session_string|enc_key)\s*[=:]\s*\S+", r"\1=[REDACTED]", raw)
@@ -938,22 +708,20 @@ async def _notify_error(bot, user_id, exc, where="update"):
         return
     _ERROR_ALERT_COOLDOWN[key] = now
     details = _safe_error_text(exc)
+    emit("error", user_id, ok=0, detail=f"{where}: {details}")
     try:
         await bot.send_message(
             OWNER_ID,
             "🚨 <b>Bot error alert</b>\n"
-            f"📍 জায়গা: <code>{h(where)}</code>\n"
+            f"📍 জায়গা: <code>{h(where)}</code>\n"
             f"👤 User ID: <code>{user_id or 'unknown'}</code>\n"
-            f"⚠️ সমস্যা: <code>{h(details)}</code>\n"
-            "🛠️ স্বয়ংক্রিয় recovery চেষ্টা করা হয়েছে যেখানে নিরাপদ।"
-        )
+            f"⚠️ সমস্যা: <code>{h(details)}</code>")
     except Exception:
         log.exception("could not send error alert to owner")
 
 
 @dp.errors()
 async def global_error_handler(event: ErrorEvent):
-    """Catch otherwise-unhandled aiogram update errors and inform user + owner."""
     exc = event.exception
     log.exception("unhandled Telegram update error", exc_info=(type(exc), exc, exc.__traceback__))
     update = event.update
@@ -965,14 +733,14 @@ async def global_error_handler(event: ErrorEvent):
         user_id = message.from_user.id if message.from_user else None
         bot = message.bot
         try:
-            await message.answer("⚠️ দুঃখিত! বটে সাময়িক সমস্যা হয়েছে। সমস্যাটি অ্যাডমিনকে জানানো হয়েছে। কিছুক্ষণ পর আবার চেষ্টা করুন।")
+            await message.answer("⚠️ দুঃখিত! বটে সাময়িক সমস্যা হয়েছে। অ্যাডমিনকে জানানো হয়েছে।")
         except Exception:
             pass
     elif callback:
         user_id = callback.from_user.id
         bot = callback.bot
         try:
-            await callback.answer("⚠️ সাময়িক সমস্যা হয়েছে। অ্যাডমিনকে জানানো হয়েছে।", show_alert=True)
+            await callback.answer("⚠️ সাময়িক সমস্যা হয়েছে।", show_alert=True)
         except Exception:
             pass
     if bot:
@@ -981,52 +749,40 @@ async def global_error_handler(event: ErrorEvent):
 
 
 async def self_healing_supervisor(bot):
-    """Recover persisted user clients; one bad DB row/client never kills the monitor."""
     while True:
         try:
             rows = db.execute("SELECT id, session, owner FROM clients").fetchall()
             for tg_id, encrypted_session, owner in rows:
-                # A stale RUNNING entry must not hide a disconnected Telegram client.
                 current = RUNNING.get(tg_id)
                 if current is not None and getattr(current[0], "is_connected", False):
                     continue
                 if current is not None:
-                    log.warning("client %s is disconnected; cleaning up before recovery", tg_id)
                     await stop_client(tg_id)
                 try:
                     session = fernet.decrypt(encrypted_session).decode()
                     await start_client(session, tg_id, owner or OWNER_ID)
-                    log.info("self-healing: client %s recovered", tg_id)
-                    try:
-                        await bot.send_message(OWNER_ID, f"✅ Auto-recovery সফল: Client <code>{tg_id}</code> আবার চালু হয়েছে।")
-                    except Exception:
-                        log.warning("owner recovery notification failed for client %s", tg_id)
+                    emit("recovery", owner or OWNER_ID, detail=f"client {tg_id} recovered")
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
-                    log.exception("self-healing failed for client %s", tg_id)
+                    emit("error", owner or OWNER_ID, ok=0, detail=f"recovery {tg_id}: {exc}")
                     await _notify_error(bot, OWNER_ID, exc, f"client recovery {tg_id}")
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            log.exception("self-healing supervisor cycle failed")
             await _notify_error(bot, OWNER_ID, exc, "self-healing supervisor")
         await asyncio.sleep(20)
 
 
 async def _run_guarded_background(name, factory, bot):
-    """Keep essential background jobs alive if an unexpected exception escapes."""
     delay = 5
     while True:
         try:
-            log.info("background task starting: %s", name)
             await factory()
-            # These jobs are designed to run forever; an ordinary return is unexpected.
             raise RuntimeError(f"background task {name} stopped unexpectedly")
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            log.exception("background task crashed: %s", name)
             await _notify_error(bot, OWNER_ID, exc, f"background task {name}")
             await asyncio.sleep(delay)
             delay = min(delay * 2, 120)
@@ -1035,68 +791,47 @@ async def _run_guarded_background(name, factory, bot):
 
 
 async def _runtime_health_monitor(bot):
-    """Check database and Telegram clients; recovery is delegated to supervisor."""
     while True:
         try:
             db.execute("SELECT 1").fetchone()
             disconnected = [tid for tid, (app, _calls, _owner) in list(RUNNING.items())
                             if not getattr(app, "is_connected", False)]
             for tid in disconnected:
-                exc = ConnectionError(f"Telegram client {tid} is disconnected; supervisor will retry")
+                exc = ConnectionError(f"Telegram client {tid} disconnected")
                 await _notify_error(bot, OWNER_ID, exc, "client health check")
-            cutoff = time.time() - (_ERROR_ALERT_WINDOW * 4)
-            for key, stamp in list(_ERROR_ALERT_COOLDOWN.items()):
-                if stamp < cutoff:
-                    _ERROR_ALERT_COOLDOWN.pop(key, None)
+            db.execute("DELETE FROM events WHERE ts < ?", (int(time.time()) - 30 * 86400,))
+            db.commit()
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            log.exception("runtime health check failed")
             await _notify_error(bot, OWNER_ID, exc, "runtime health check")
         await asyncio.sleep(30)
 
 
-# ---------- basic ----------
 @dp.message(CommandStart())
 async def start(m: Message, state: FSMContext):
-    # New/unapproved users see ONLY the VIP key prompt first.
-    # Welcome text and the main menu are shown after approval/key activation
-    # when the user sends /start again.
     await state.clear()
     uid = m.from_user.id
-
     if uid != OWNER_ID:
         row = db.execute("SELECT status FROM users WHERE user_id=?", (uid,)).fetchone()
         status = row[0] if row else None
-
         if status == "banned":
             return await m.answer("⛔ You are permanently banned from this bot by the owner.")
-
         if status != "approved":
-            # Register first-time users and notify the owner once.
             if status is None:
-                db.execute(
-                    "INSERT OR REPLACE INTO users(user_id,name,username,status) VALUES(?,?,?,?)",
-                    (uid, m.from_user.full_name, m.from_user.username or "", "pending")
-                )
+                db.execute("INSERT OR REPLACE INTO users(user_id,name,username,status) VALUES(?,?,?,?)",
+                           (uid, m.from_user.full_name, m.from_user.username or "", "pending"))
                 db.commit()
+                emit("access_request", uid, detail=f"{m.from_user.full_name} @{m.from_user.username or ''}")
                 try:
                     uname = f"@{h(m.from_user.username)}" if m.from_user.username else "—"
                     await m.bot.send_message(
                         OWNER_ID,
                         f"🔔 New access request\n\n👤 Name: {h(m.from_user.full_name)}\n🔗 Username: {uname}\n🆔 ID: {uid}",
-                        reply_markup=ikb([
-                            ("✅ Accept", f"adm:ap:{uid}", "success"),
-                            ("❌ Reject", f"adm:rj:{uid}", "danger")
-                        ])
-                    )
+                        reply_markup=ikb([("✅ Accept", f"adm:ap:{uid}", "success"), ("❌ Reject", f"adm:rj:{uid}", "danger")]))
                 except Exception as e:
                     log.warning("owner notify failed: %r", e)
-
-            # No welcome message or main menu until the user is approved.
             return await m.answer(ACCESS_KEY_PROMPT, reply_markup=VIP_BTN)
-
-    # Approved users and the owner see the welcome message first, then menu.
     await m.answer(WELCOME_TEXT)
     plan = "👑 Admin" if uid == OWNER_ID else ("💎 VIP" if is_vip(uid) else "🔐 Member")
     total, online = len(client_rows(uid)), len(user_clients(uid))
@@ -1144,22 +879,22 @@ async def setemoji(m: Message, state: FSMContext):
     await state.set_state(S.emoji_pack)
     lst = "\n".join(f"{i}. {e}  {d}" for i, (e, d) in enumerate(SLOTS, 1))
     await m.answer(hd("💎", "Premium emoji setup", "owner account needs Telegram Premium") +
-                   "Send ONE message with premium emoji in exactly this order (spaces between are fine):\n\n"
-                   f"{lst}\n\nSend fewer to set only the first ones. /cancel to abort.", reply_markup=back_kb())
+                   "Send ONE message with premium emoji in exactly this order:\n\n"
+                   f"{lst}\n\n/cancel to abort.", reply_markup=back_kb())
 
 
 @dp.message(S.emoji_pack)
 async def setemoji_do(m: Message, state: FSMContext):
     ents = [e for e in (m.entities or []) if e.type == "custom_emoji"]
     if not ents:
-        return await m.answer("❌ No premium emoji found in that message. Send them again, or /cancel.")
+        return await m.answer("❌ No premium emoji found. Try again or /cancel.")
     for e, (slot, _d) in zip(ents, SLOTS):
         PREMIUM[norm(slot)] = e.custom_emoji_id
         db.execute("INSERT OR REPLACE INTO premium(emoji,cid) VALUES(?,?)", (norm(slot), e.custom_emoji_id))
     db.commit()
     await state.clear()
     n = min(len(ents), len(SLOTS))
-    await m.answer(hd("🎉", "Premium emoji saved", f"{n} of {len(SLOTS)} set") + "Menu and messages now use them.", reply_markup=kb(m.from_user.id))
+    await m.answer(hd("🎉", "Premium emoji saved", f"{n} of {len(SLOTS)} set"), reply_markup=kb(m.from_user.id))
 
 
 @dp.message(Command("setpack"))
@@ -1169,10 +904,7 @@ async def setpack(m: Message):
     args = (m.text or "").split()[1:]
     names = [re.sub(r".*/(?:addemoji|addstickers)/", "", a).strip("/ ") for a in args]
     if not names:
-        return await m.answer(hd("💎", "Premium emoji pack", "one link = whole bot turns premium") +
-                              "Send:\n<code>/setpack https://t.me/addemoji/PackName</code>\n\n"
-                              "How to get a link: tap any premium emoji → tap its pack name → Share → Copy link.\n"
-                              "You can give several packs, separated by a space.")
+        return await m.answer("Send:\n<code>/setpack https://t.me/addemoji/PackName</code>")
     by_emoji, pool, errs = {}, [], []
     for n in names:
         try:
@@ -1187,17 +919,17 @@ async def setpack(m: Message):
                 if cid not in pool:
                     pool.append(cid)
     if not pool:
-        return await m.answer("❌ Could not read that pack (it must be a custom EMOJI pack).\n" + "\n".join(errs))
+        return await m.answer("❌ Could not read that pack.\n" + "\n".join(errs))
     chosen = {}
-    for slot, _d in SLOTS:                       # 1) exact emoji match
+    for slot, _d in SLOTS:
         if norm(slot) in by_emoji:
             chosen[norm(slot)] = by_emoji[norm(slot)]
     exact = len(chosen)
     spare = [c for c in pool if c not in chosen.values()]
-    for slot, _d in SLOTS:                       # 2) fill the rest from unused pack emoji
+    for slot, _d in SLOTS:
         if norm(slot) not in chosen and spare:
             chosen[norm(slot)] = spare.pop(0)
-    for e, cid in by_emoji.items():              # 3) every other emoji the pack covers
+    for e, cid in by_emoji.items():
         if e and e not in chosen:
             chosen[e] = cid
     for e, cid in chosen.items():
@@ -1205,8 +937,7 @@ async def setpack(m: Message):
         db.execute("INSERT OR REPLACE INTO premium(emoji,cid) VALUES(?,?)", (e, cid))
     db.commit()
     await m.answer(hd("🎉", "Premium pack applied", f"{len(chosen)} emoji ready") +
-                   f"💎 Exact matches — <b>{exact}</b>\n⚡ Filled from pack — <b>{len(chosen) - exact}</b>\n\n"
-                   "Menu + all messages now use them.", reply_markup=kb(m.from_user.id))
+                   f"💎 Exact — <b>{exact}</b>\n⚡ Filled — <b>{len(chosen) - exact}</b>", reply_markup=kb(m.from_user.id))
 
 
 @dp.message(Command("resetemoji"))
@@ -1235,10 +966,9 @@ async def emoji_ids(m: Message):
         if e.type == "custom_emoji":
             ch = e.extract_from(m.text)
             lines.append(f'{h(ch)} → <code>{e.custom_emoji_id}</code>')
-    await m.answer("\n".join(lines) + '\n\nSaved automatically via /setemoji or /setpack — no code edit needed.')
+    await m.answer("\n".join(lines))
 
 
-# ---------- My Clients / Add Client ----------
 def client_rows(uid):
     if uid == OWNER_ID:
         return db.execute("SELECT id, name, phone, owner FROM clients ORDER BY id").fetchall()
@@ -1252,10 +982,10 @@ async def my_clients(m: Message):
     uid = m.from_user.id
     rows = client_rows(uid)
     if not rows:
-        return await m.answer(hd("📱", "Accounts", "nothing here yet") + "Tap <b>➕ Add Account</b> to log one in.")
+        return await m.answer(hd("📱", "Accounts", "nothing here yet") + "Tap <b>➕ Add Account</b>.")
     lines = []
     for i, (c, n, p, o) in enumerate(rows, 1):
-        shared = uid != OWNER_ID and o == OWNER_ID   # admin's account seen by a VIP user
+        shared = uid != OWNER_ID and o == OWNER_ID
         l = f"{i}. {'🟢' if c in RUNNING else '🔴'} {h(n)} | 📞 {'hidden' if shared else h(p)} | 🆔 {c}"
         if uid == OWNER_ID:
             l += f" | 👥 {h(owner_name(o))}"
@@ -1266,16 +996,15 @@ async def my_clients(m: Message):
     if len(body) > 3500:
         body = body[:3500] + "\n…"
     on = sum(1 for r in rows if r[0] in RUNNING)
-    await m.answer(hd("📱", f"Accounts · {len(rows)}", f"🟢 {on} online · 🔴 {len(rows) - on} offline") +
+    await m.answer(hd("📱", f"Accounts · {len(rows)}", f"🟢 {on} online") +
                    f"<blockquote expandable>{body}</blockquote>\n\n🧹 <code>/remove 3</code>")
 
 
 @dp.message(ANY(B_ADD))
 async def add_client_btn(m: Message):
-    await m.answer(
-        hd("➕", "Add account", "phone number + OTP, or QR (no code needed)") + "Tap a button to start.",
-        reply_markup=ikb([("📱 Add by Phone Number", "add_phone", "primary")],
-                         [("🔳 Add by QR (any country)", "add_qr", "primary")]))
+    await m.answer(hd("➕", "Add account", "phone number + OTP, or QR") + "Tap a button.",
+                   reply_markup=ikb([("📱 Add by Phone Number", "add_phone", "primary")],
+                                    [("🔳 Add by QR (any country)", "add_qr", "primary")]))
 
 
 def login_client(uid):
@@ -1287,10 +1016,9 @@ def login_client(uid):
 def code_where(sent):
     t = str(getattr(sent.type, "name", sent.type))
     n = str(getattr(sent.next_type, "name", sent.next_type)) if sent.next_type else None
-    where = {"APP": "📲 Telegram app (the 'Telegram' service chat on any device logged in)",
-             "SMS": "💬 SMS", "CALL": "📞 phone call", "FLASH_CALL": "📞 flash call",
-             "MISSED_CALL": "📞 missed call (last digits)", "FRAGMENT_SMS": "💎 Fragment SMS",
-             "FIREBASE_SMS": "💬 SMS", "EMAIL_CODE": "📧 email"}.get(t, t)
+    where = {"APP": "📲 Telegram app", "SMS": "💬 SMS", "CALL": "📞 phone call",
+             "FLASH_CALL": "📞 flash call", "MISSED_CALL": "📞 missed call",
+             "FRAGMENT_SMS": "💎 Fragment SMS", "FIREBASE_SMS": "💬 SMS", "EMAIL_CODE": "📧 email"}.get(t, t)
     txt = f"Code sent via: {where}"
     if n:
         txt += f"\nNext option after /resend: {n}"
@@ -1300,9 +1028,8 @@ def code_where(sent):
 @dp.callback_query(F.data == "add_phone")
 async def add_phone(c: CallbackQuery, state: FSMContext):
     await state.set_state(S.phone)
-    await c.message.answer(
-        "📱 Add by Phone Number\n\nSend the Telegram account phone number with country code, e.g. +1234567890.\n\n"
-        "Tap 🔙 Back to cancel, or send /cancel to abort.", reply_markup=back_kb())
+    await c.message.answer("📱 Send the Telegram phone number with country code, e.g. +1234567890.\n\n/cancel to abort.",
+                           reply_markup=back_kb())
     await c.answer()
 
 
@@ -1327,9 +1054,9 @@ async def add_qr(c: CallbackQuery, state: FSMContext):
     PENDING[uid] = p
     p["task"] = asyncio.create_task(qr_flow(c.message, state, p, uid))
     await c.message.answer(
-        "🔳 <b>QR login</b>\n\nA QR image is coming. On the phone where this account is already logged in:\n"
-        "Telegram → Settings → Devices → <b>Link Desktop Device</b> → scan the QR.\n\n"
-        "No SMS / OTP needed, works for any country.\nSend /cancel to abort.", reply_markup=back_kb())
+        "🔳 <b>QR login</b>\n\nA QR image is coming. On the phone where this account is logged in:\n"
+        "Telegram → Settings → Devices → <b>Link Desktop Device</b> → scan the QR.\n\n/cancel to abort.",
+        reply_markup=back_kb())
 
 
 async def qr_flow(msg: Message, state: FSMContext, p, uid):
@@ -1338,11 +1065,11 @@ async def qr_flow(msg: Message, state: FSMContext, p, uid):
     try:
         ql = QRLogin(app, [])
         await ql.recreate()
-        for _ in range(8):                      # ~8 QR refreshes (each QR lives ~30s)
+        for _ in range(8):
             img = qrcode.make(ql.url)
             buf = io.BytesIO(); img.save(buf, format="PNG")
             photo = await msg.answer_photo(BufferedInputFile(buf.getvalue(), "qr.png"),
-                                           caption="📷 Scan this QR (expires in ~30s, a new one will follow)")
+                                           caption="📷 Scan this QR (expires in ~30s)")
             try:
                 await ql.wait()
                 break
@@ -1372,7 +1099,7 @@ async def ban_cmd(m: Message):
         return
     args = (m.text or "").split()[1:]
     if not args or not args[0].lstrip("-").isdigit():
-        return await m.answer("Usage: /ban USER_ID\n(get the ID from 👥 Users in the admin panel, or from a forwarded message)")
+        return await m.answer("Usage: /ban USER_ID")
     uid = int(args[0])
     if uid == OWNER_ID:
         return await m.answer("❌ You can't ban yourself.")
@@ -1380,10 +1107,9 @@ async def ban_cmd(m: Message):
                "ON CONFLICT(user_id) DO UPDATE SET status='banned'", (uid, str(uid), ""))
     db.execute("DELETE FROM vip_users WHERE user_id=?", (uid,))
     db.commit()
-    try:
-        await m.bot.send_message(uid, "⛔ You have been permanently banned from this bot by the owner.")
-    except Exception:
-        pass
+    emit("ban", uid, ok=0, detail="banned by owner")
+    try: await m.bot.send_message(uid, "⛔ You have been permanently banned from this bot by the owner.")
+    except Exception: pass
     await m.answer(f"🚫 User {uid} banned.")
 
 
@@ -1398,77 +1124,60 @@ async def unban_cmd(m: Message):
     row = db.execute("SELECT status FROM users WHERE user_id=?", (uid,)).fetchone()
     if not row or row[0] != "banned":
         return await m.answer("That user isn't banned.")
-    db.execute("UPDATE users SET status='rejected' WHERE user_id=?", (uid,))  # back to normal (must request access again)
+    db.execute("UPDATE users SET status='rejected' WHERE user_id=?", (uid,))
     db.commit()
-    try:
-        await m.bot.send_message(uid, "✅ Your ban has been lifted. Send /start to request access again.")
-    except Exception:
-        pass
+    emit("unban", uid, detail="unbanned by owner")
+    try: await m.bot.send_message(uid, "✅ Ban lifted. Send /start to request access again.")
+    except Exception: pass
     await m.answer(f"✅ User {uid} unbanned.")
 
 
 @dp.message(Command("deleteuser"))
 async def deleteuser_cmd(m: Message):
-    # Permanent user cleanup; owner account is protected.
     if m.from_user.id != OWNER_ID:
         return
     args = (m.text or "").split()[1:]
     if not args or not args[0].lstrip("-").isdigit():
-        return await m.answer("Usage: /deleteuser USER_ID\nExample: /deleteuser 123456789")
-
+        return await m.answer("Usage: /deleteuser USER_ID")
     uid = int(args[0])
     if uid == OWNER_ID:
         return await m.answer("❌ Owner account cannot be deleted.")
-
     exists = db.execute(
         "SELECT 1 FROM users WHERE user_id=? UNION SELECT 1 FROM clients WHERE owner=? "
         "UNION SELECT 1 FROM vip_users WHERE user_id=? UNION SELECT 1 FROM auto2 WHERE owner=? LIMIT 1",
-        (uid, uid, uid, uid)
-    ).fetchone()
+        (uid, uid, uid, uid)).fetchone()
     if not exists:
-        return await m.answer("ℹ️ এই User ID-এর কোনো রেকর্ড পাওয়া যায়নি।")
-
-    # Stop all active Telegram clients owned by this user before deleting DB rows.
+        return await m.answer("ℹ️ No records found.")
     client_ids = [r[0] for r in db.execute("SELECT id FROM clients WHERE owner=?", (uid,)).fetchall()]
     for tg_id, (_app, _calls, owner) in list(RUNNING.items()):
         if owner == uid and tg_id not in client_ids:
             client_ids.append(tg_id)
     for tg_id in client_ids:
         await stop_client(tg_id)
-
-    # Cancel any unfinished phone/QR login session for this bot user.
     pending = PENDING.pop(uid, None)
     if pending:
         task = pending.get("task")
         if task and not task.done():
             task.cancel()
-        try:
-            await pending["app"].disconnect()
-        except Exception:
-            pass
-
+        try: await pending["app"].disconnect()
+        except Exception: pass
     try:
         db.execute("BEGIN")
         db.execute("DELETE FROM clients WHERE owner=?", (uid,))
         db.execute("DELETE FROM auto2 WHERE owner=?", (uid,))
         db.execute("DELETE FROM vip_users WHERE user_id=?", (uid,))
-        # Keep key history, but revoke keys previously assigned to this user.
         db.execute("UPDATE access_keys SET status='revoked', used_by=NULL WHERE used_by=?", (uid,))
         db.execute("DELETE FROM users WHERE user_id=?", (uid,))
         db.commit()
     except Exception:
         db.rollback()
-        log.exception("deleteuser failed for %s", uid)
-        return await m.answer("❌ ইউজার ডিলিট করা যায়নি। লগ চেক করো।")
-
+        return await m.answer("❌ Delete failed.")
     for key in [k for k in list(AUTO_REACT) if k[0] == uid]:
         AUTO_REACT.pop(key, None)
     for key in [k for k in list(AUTO_VIEW) if k[0] == uid]:
         AUTO_VIEW.discard(key)
-    for key in [k for k in list(SEEN) if k[0] in client_ids]:
-        SEEN.pop(key, None)
-
-    await m.answer(f"🗑️ User <code>{uid}</code> এবং তার সংরক্ষিত ডেটা সফলভাবে ডিলিট করা হয়েছে।")
+    emit("deleteuser", uid, detail="deleted by owner")
+    await m.answer(f"🗑️ User <code>{uid}</code> deleted.")
 
 
 @dp.message(Command("remove"))
@@ -1477,15 +1186,16 @@ async def remove_cmd(m: Message):
     nums = [int(x) for x in (m.text or "").split()[1:] if x.isdigit()]
     nums = [n for n in nums if 1 <= n <= len(rows)]
     if not nums:
-        return await m.answer("Usage: /remove NUMBER\nUse the number from the 📱 Accounts list. Several at once: /remove 2 5 7")
+        return await m.answer("Usage: /remove NUMBER")
     names = []
     for n in sorted(set(nums)):
         cid, name, _p, own = rows[n - 1]
         if m.from_user.id != OWNER_ID and own != m.from_user.id:
-            continue   # VIP users can't remove the admin's accounts
+            continue
         await stop_client(cid)
         db.execute("DELETE FROM clients WHERE id=?", (cid,))
         names.append(h(name))
+        emit("account_removed", m.from_user.id, detail=f"{name} · {cid}")
     db.commit()
     await m.answer("🗑 Removed: " + ", ".join(names))
 
@@ -1506,34 +1216,33 @@ async def got_phone(m: Message, state: FSMContext):
     except FloodWait as e:
         try: await app.disconnect()
         except Exception: pass
-        return await m.answer(f"⏳ Telegram says wait {e.value} seconds ({e.value // 60} min) before asking a code for this number. Do NOT retry until then.")
+        return await m.answer(f"⏳ Wait {e.value} seconds before retry.")
     except Exception as e:
         try: await app.disconnect()
         except Exception: pass
-        log.exception("send_code failed")
-        return await m.answer(f"❌ Could not send code: {h(e.__class__.__name__)}: {h(e)}\nTry again or tap 🔙 Back.")
+        return await m.answer(f"❌ Could not send code: {h(e.__class__.__name__)}: {h(e)}")
     PENDING[m.from_user.id] = dict(app=app, phone=phone, hash=sent.phone_code_hash)
     await state.set_state(S.otp)
-    await m.answer(
-        f"🔑 Code requested for {h(phone)}\n\n{h(code_where(sent))}\n\n"
-        "Type the code with dashes so Telegram doesn't expire it: <code>1-2-3-4-5</code>\n"
-        "Code not arriving? Send /resend to try the next method (SMS / call).\n\n"
-        "Tap 🔙 Back to cancel, or send /cancel to abort.")
+    await m.answer(f"🔑 Code requested for {h(phone)}\n\n{h(code_where(sent))}\n\n"
+                   "Type the code with dashes: <code>1-2-3-4-5</code>\n"
+                   "/resend for the next method.\n\n/cancel to abort.")
 
 
 @dp.message(Command("resend"), S.otp)
 async def resend_code_cmd(m: Message):
     p = PENDING.get(m.from_user.id)
     if not p:
-        return await m.answer("❌ No login in progress. Send the phone number again.")
+        return await m.answer("❌ No login in progress.")
     try:
         sent = await p["app"].resend_code(p["phone"], p["hash"])
     except FloodWait as e:
-        return await m.answer(f"⏳ Wait {e.value} seconds before resending.")
+        return await m.answer(f"⏳ Wait {e.value} seconds.")
+    except SendCodeUnavailable:
+        return await m.answer("❌ No more delivery methods. Try QR login.")
     except Exception as e:
         return await m.answer(f"❌ Resend failed: {h(e.__class__.__name__)}: {h(e)}")
     p["hash"] = sent.phone_code_hash
-    await m.answer(f"🔁 New code requested.\n\n{h(code_where(sent))}\n\nType it like <code>1-2-3-4-5</code>.")
+    await m.answer(f"🔁 New code requested.\n\n{h(code_where(sent))}")
 
 
 async def finish_login(m: Message, state: FSMContext, p, uid=None):
@@ -1549,6 +1258,7 @@ async def finish_login(m: Message, state: FSMContext, p, uid=None):
                (me.id, name, p["phone"], fernet.encrypt(session.encode()), uid))
     db.commit()
     log_activity(uid, "account_added", f"{name} · Telegram ID {me.id}")
+    emit("account_added", uid, ok=1, detail=f"{name} · Telegram ID {me.id} · {p['phone']}")
     if uid != OWNER_ID:
         await notify_owner_activity(m.bot, m.from_user, "account_added",
                                     f"Account: {name} · Telegram ID: {me.id} · Phone: {p['phone']}")
@@ -1564,14 +1274,14 @@ async def got_otp(m: Message, state: FSMContext):
     p = PENDING.get(m.from_user.id)
     code = "".join(re.findall(r"\d", m.text))
     if not p or len(code) < 5:
-        return await m.answer("❌ Couldn't find a valid code. Send it again.")
+        return await m.answer("❌ Couldn't find a valid code.")
     try:
         await p["app"].sign_in(p["phone"], p["hash"], code)
     except SessionPasswordNeeded:
         await state.set_state(S.pwd)
         return await m.answer("🔐 2-Step Verification is enabled.\n\nSend your account password.")
     except (PhoneCodeInvalid, PhoneCodeExpired) as e:
-        return await m.answer(f"❌ {e.__class__.__name__}. Send the correct code, or /cancel and retry.")
+        return await m.answer(f"❌ {e.__class__.__name__}.")
     except Exception as e:
         return await m.answer(f"❌ Login failed: {h(e)}")
     await finish_login(m, state, p)
@@ -1583,22 +1293,19 @@ async def got_pwd(m: Message, state: FSMContext):
     try:
         await p["app"].check_password(m.text.strip())
     except PasswordHashInvalid:
-        return await m.answer("❌ Wrong password. Try again.")
+        return await m.answer("❌ Wrong password.")
     except Exception as e:
         return await m.answer(f"❌ Login failed: {h(e)}")
-    try: await m.delete()  # remove password from chat
+    try: await m.delete()
     except Exception: pass
     await finish_login(m, state, p)
 
 
-# ---------- Join Channel ----------
 @dp.message(ANY(B_JOIN))
 async def join_ask(m: Message, state: FSMContext):
     await state.set_state(S.join)
-    await m.answer(
-        hd("🚀", "Join channel") + "Send the username or invite link.\n\n"
-        "• Public: @username or https://t.me/username\n• Private: https://t.me/+InviteHash\n\n"
-        "All your clients will attempt to join.\n\nSend /cancel to abort.", reply_markup=back_kb())
+    await m.answer(hd("🚀", "Join channel") + "Send the username or invite link.\n\n/cancel to abort.",
+                   reply_markup=back_kb())
 
 
 @dp.message(S.join)
@@ -1607,20 +1314,15 @@ async def join_do(m: Message, state: FSMContext):
     await state.clear()
     await m.answer("⏳ Joining...")
     ok, fail, secs = await for_all(m.from_user.id, lambda app, _: app.join_chat(target))
+    emit("join_channel", m.from_user.id, chat=str(target), ok=(fail == 0), detail=f"ok={ok} fail={fail}")
     await m.answer(report(ok, fail, secs, "Joined"), reply_markup=kb(m.from_user.id))
 
 
-# ---------- Voice chat ----------
 @dp.message(ANY(B_JVC))
 async def jvc_ask(m: Message, state: FSMContext):
     await state.set_state(S.jvc)
-    await m.answer(
-        hd("🎧", "Voice join") + "Send the username or Chat ID.\n\n"
-        "• Public: @username or https://t.me/username\n"
-        "• Private: Chat ID (e.g. -1001234567890) or https://t.me/c/1234567890\n\n"
-        "⚠️ For private groups/channels: use 🚀 Join Channel first, then come here with the Chat ID.\n"
-        "⚠️ Invite links (t.me/+...) are not supported here — use the Chat ID instead.\n\nSend /cancel to abort.",
-        reply_markup=back_kb())
+    await m.answer(hd("🎧", "Voice join") + "Send username or Chat ID.\n\n⚠️ Invite links not supported here — use Chat ID.\n\n/cancel to abort.",
+                   reply_markup=back_kb())
 
 
 @dp.message(S.jvc)
@@ -1632,12 +1334,13 @@ async def jvc_do(m: Message, state: FSMContext):
     await m.answer("⏳ Joining voice chat...")
 
     async def fn(app, calls):
-        await app.get_chat(chat)   # cache peer
-        await calls.play(chat)     # no stream = silent listener
+        await app.get_chat(chat)
+        await calls.play(chat)
 
     ok, fail, secs = await for_all(m.from_user.id, fn)
     details = f"chat={chat}; success={ok}; failed={fail}"
     log_activity(m.from_user.id, "voice_join", details)
+    emit("voice_join", m.from_user.id, chat=str(chat), ok=(fail == 0), detail=details)
     await notify_owner_activity(m.bot, m.from_user, "voice_join", details)
     await m.answer(report(ok, fail, secs, "Joined VC"), reply_markup=kb(m.from_user.id))
 
@@ -1645,7 +1348,7 @@ async def jvc_do(m: Message, state: FSMContext):
 @dp.message(ANY(B_LVC))
 async def lvc_ask(m: Message, state: FSMContext):
     await state.set_state(S.lvc)
-    await m.answer(hd("🔇", "Voice leave") + "Send the username or Chat ID.\n\nSend /cancel to abort.", reply_markup=back_kb())
+    await m.answer(hd("🔇", "Voice leave") + "Send username or Chat ID.\n\n/cancel to abort.", reply_markup=back_kb())
 
 
 @dp.message(S.lvc)
@@ -1659,25 +1362,26 @@ async def lvc_do(m: Message, state: FSMContext):
     ok, fail, secs = await for_all(m.from_user.id, fn)
     details = f"chat={chat}; success={ok}; failed={fail}"
     log_activity(m.from_user.id, "voice_leave", details)
+    emit("voice_leave", m.from_user.id, chat=str(chat), ok=(fail == 0), detail=details)
     await notify_owner_activity(m.bot, m.from_user, "voice_leave", details)
     await m.answer(report(ok, fail, secs, "Left VC"), reply_markup=kb(m.from_user.id))
 
 
-# ---------- Send Reaction ----------
 @dp.message(ANY(B_REACT))
 async def react_ask(m: Message, state: FSMContext):
     await state.set_state(S.react_link)
-    await m.answer(hd("💫", "React") + "Send the post link, e.g. https://t.me/channel/123\n\nSend /cancel to abort.", reply_markup=back_kb())
+    await m.answer(hd("💫", "React") + "Send the post link, e.g. https://t.me/channel/123\n\n/cancel to abort.",
+                   reply_markup=back_kb())
 
 
 @dp.message(S.react_link)
 async def react_link(m: Message, state: FSMContext):
     post = parse_post(m.text)
     if not post:
-        return await m.answer("❌ Invalid post link. Try again.")
+        return await m.answer("❌ Invalid post link.")
     await state.update_data(post=post)
     await state.set_state(S.react_emoji)
-    await m.answer("Now send the emoji to react with (e.g. 👍 💫 🔥).")
+    await m.answer("Now send the emoji (e.g. 👍 💫 🔥).")
 
 
 @dp.message(S.react_emoji)
@@ -1691,10 +1395,10 @@ async def react_do(m: Message, state: FSMContext):
         await app.send_reaction(chat, mid, emoji)
 
     ok, fail, secs = await for_all(m.from_user.id, fn)
+    emit("react_post", m.from_user.id, chat=str(chat), ok=(fail == 0), detail=f"post={mid} emoji={emoji}")
     await m.answer(report(ok, fail, secs, "Reacted"), reply_markup=kb(m.from_user.id))
 
 
-# ---------- Auto React / Auto View ----------
 def auto_list(uid):
     r = ", ".join(f"{c} {h(e)}" for (o, c), e in AUTO_REACT.items() if o == uid) or "none"
     v = ", ".join(str(c) for (o, c) in AUTO_VIEW if o == uid) or "none"
@@ -1712,9 +1416,8 @@ async def resolve_chat_id(uid, target):
 @dp.message(ANY(B_AR))
 async def ar_ask(m: Message, state: FSMContext):
     await state.set_state(S.ar_chat)
-    await m.answer(hd("⚡", "Auto react") + f"{auto_list(m.from_user.id)}\n\nSend the channel username/Chat ID to enable.\n"
-                   "Add <code>off</code> after it to disable, e.g. <code>@channel off</code>.\n\nSend /cancel to abort.",
-                   reply_markup=back_kb())
+    await m.answer(hd("⚡", "Auto react") + f"{auto_list(m.from_user.id)}\n\nSend channel username/Chat ID.\n"
+                   "Add <code>off</code> to disable.\n\n/cancel to abort.", reply_markup=back_kb())
 
 
 @dp.message(S.ar_chat)
@@ -1729,10 +1432,11 @@ async def ar_chat(m: Message, state: FSMContext):
         AUTO_REACT.pop((uid, chat), None)
         db.execute("DELETE FROM auto2 WHERE owner=? AND kind='react' AND chat_id=?", (uid, str(chat))); db.commit()
         await state.clear()
+        emit("auto_react", uid, chat=str(chat), detail="disabled")
         return await m.answer("⚡ Auto React disabled.", reply_markup=kb(uid))
     await state.update_data(chat=chat)
     await state.set_state(S.ar_emoji)
-    await m.answer("Send the emoji to auto-react with.")
+    await m.answer("Send the emoji.")
 
 
 @dp.message(S.ar_emoji)
@@ -1743,14 +1447,15 @@ async def ar_emoji(m: Message, state: FSMContext):
     AUTO_REACT[(uid, chat)] = emoji
     db.execute("INSERT OR REPLACE INTO auto2 VALUES(?,'react',?,?)", (uid, str(chat), emoji)); db.commit()
     await state.clear()
+    emit("auto_react", uid, chat=str(chat), detail=f"enabled {emoji}")
     await m.answer(f"✅ Auto React enabled for {chat} with {h(emoji)}", reply_markup=kb(uid))
 
 
 @dp.message(ANY(B_AV))
 async def av_ask(m: Message, state: FSMContext):
     await state.set_state(S.av_chat)
-    await m.answer(hd("👀", "Auto view") + f"{auto_list(m.from_user.id)}\n\nSend the channel username/Chat ID to enable.\n"
-                   "Add <code>off</code> to disable, e.g. <code>@channel off</code>.\n\nSend /cancel to abort.", reply_markup=back_kb())
+    await m.answer(hd("👀", "Auto view") + f"{auto_list(m.from_user.id)}\n\nSend channel username/Chat ID.\n"
+                   "Add <code>off</code> to disable.\n\n/cancel to abort.", reply_markup=back_kb())
 
 
 @dp.message(S.av_chat)
@@ -1769,6 +1474,7 @@ async def av_chat(m: Message, state: FSMContext):
         db.execute("INSERT OR REPLACE INTO auto2 VALUES(?,'view',?,'')", (uid, str(chat)))
     db.commit()
     await state.clear()
+    emit("auto_view", uid, chat=str(chat), detail="disabled" if off else "enabled")
     await m.answer(f"👀 Auto View {'disabled' if off else 'enabled'} for {chat}", reply_markup=kb(uid))
     if off:
         for k in [k for k in SEEN if k[1] == chat and k[2] == "v"]:
@@ -1778,17 +1484,14 @@ async def av_chat(m: Message, state: FSMContext):
     err = ""
     for tg_id, (app, _c, _o) in user_clients(uid):
         try:
-            SEEN[(tg_id, chat, "v")] = set(await recent_ids(app, chat))   # baseline: only NEW posts get views
+            SEEN[(tg_id, chat, "v")] = set(await recent_ids(app, chat))
             ok += 1
         except Exception as e:
             fail += 1
             err = repr(e)
-    await m.answer(f"👀 Ready for new posts\n✅ OK: {ok} client(s)\n❌ Failed: {fail} client(s)"
-                   + (f"\n\nError: {h(err)}\nMake sure these accounts joined the channel first." if err else
-                      "\n\nEvery new post from now on will be viewed by all your clients."))
+    await m.answer(f"👀 Ready\n✅ OK: {ok}\n❌ Failed: {fail}" + (f"\n\n{h(err)}" if err else ""))
 
 
-# ---------- CUSTOM SMS INBOX: one account OR all authorized connected accounts ----------
 CUSTOM_INBOX_LAST_SEND = {}
 
 @dp.message(ANY(B_CUSTOM_INBOX))
@@ -1796,38 +1499,33 @@ async def custom_inbox_start(m: Message, state: FSMContext):
     await state.clear()
     clients = user_clients(m.from_user.id)
     if not clients:
-        return await m.answer(hd("📩", "Custom SMS Inbox") + "❌ আপনার নিয়ন্ত্রণে কোনো connected account online নেই। আগে Accounts থেকে account login করুন।", reply_markup=kb(m.from_user.id))
+        return await m.answer(hd("📩", "Custom SMS Inbox") + "❌ No connected accounts online.", reply_markup=kb(m.from_user.id))
     rows = []
     for tg_id, (app, _calls, _owner) in clients[:20]:
         try:
             me = await app.get_me()
-            label = f"{me.first_name or 'Account'} (@{me.username})" if me.username else f"{me.first_name or 'Account'} · {tg_id}"
+            label = f"{me.first_name or 'Account'} (@{me.username})" if me.username else f"Account · {tg_id}"
         except Exception:
             label = f"Account · {tg_id}"
         rows.append([(label[:60], f"csi:account:{tg_id}", "primary")])
     rows.append([("🌐 ALL ACCOUNTS থেকে মেসেজ পাঠান", "csi:all", "success")])
-    await m.answer(
-        hd("📩", "Custom SMS Inbox", "choose one account or all accounts") +
-        "কোন connected account থেকে মেসেজ পাঠাতে চান, সেটি বেছে নিন।\n\n"
-        "👤 উপরের যেকোনো একটি account বেছে নিলে শুধু সেটি থেকে পাঠানো হবে।\n"
-        "🌐 ALL ACCOUNTS বেছে নিলে আপনার অনুমোদিত সব connected account থেকে একই recipient-কে পাঠানো হবে।\n\n"
-        "⚠️ শুধু সম্মত recipient-কে ব্যক্তিগত মেসেজ পাঠান। Telegram-এর rate limit/FloodWait হলে কোনো account থেকে পাঠানো ব্যর্থ হতে পারে।",
-        reply_markup=ikb(*rows))
+    await m.answer(hd("📩", "Custom SMS Inbox", "choose one account or all accounts") +
+                   "শুধু সম্মত recipient-কে মেসেজ পাঠান।", reply_markup=ikb(*rows))
+
 
 @dp.callback_query(F.data == "csi:all")
 async def custom_inbox_choose_all(c: CallbackQuery, state: FSMContext):
     clients = user_clients(c.from_user.id)
     ids = [tg_id for tg_id, (app, _calls, _owner) in clients if getattr(app, "is_connected", False)]
     if not ids:
-        return await c.answer("কোনো connected account online নেই।", show_alert=True)
+        return await c.answer("No connected accounts online.", show_alert=True)
     await state.clear()
     await state.update_data(custom_tg_ids=ids, custom_mode="all")
     await state.set_state(S.custom_target)
-    await c.message.answer(
-        f"🌐 ALL ACCOUNTS নির্বাচন করেছেন। মোট <b>{len(ids)}</b>টি connected account ব্যবহার হবে।\n\n"
-        "👤 Recipient-এর Telegram username দিন (যেমন @username)।\n\n/cancel দিয়ে বাতিল করতে পারবেন।",
-        reply_markup=back_kb())
+    await c.message.answer(f"🌐 ALL ACCOUNTS · <b>{len(ids)}</b>\n\nRecipient username দিন।\n\n/cancel to abort.",
+                           reply_markup=back_kb())
     await c.answer()
+
 
 @dp.callback_query(F.data.startswith("csi:account:"))
 async def custom_inbox_choose_account(c: CallbackQuery, state: FSMContext):
@@ -1837,112 +1535,110 @@ async def custom_inbox_choose_account(c: CallbackQuery, state: FSMContext):
         return await c.answer("Invalid account", show_alert=True)
     allowed = dict(user_clients(c.from_user.id))
     if tg_id not in allowed:
-        return await c.answer("এই account আপনার ব্যবহারের অনুমতিতে নেই।", show_alert=True)
+        return await c.answer("Not allowed.", show_alert=True)
     app = allowed[tg_id][0]
     if not getattr(app, "is_connected", False):
-        return await c.answer("Account offline. আগে reconnect করুন।", show_alert=True)
+        return await c.answer("Account offline.", show_alert=True)
     await state.clear()
     await state.update_data(custom_tg_id=tg_id, custom_tg_ids=[tg_id], custom_mode="single")
     await state.set_state(S.custom_target)
-    await c.message.answer("👤 Recipient-এর Telegram username দিন (যেমন @username)।\n\n/cancel দিয়ে বাতিল করতে পারবেন।", reply_markup=back_kb())
+    await c.message.answer("👤 Recipient username দিন।\n\n/cancel to abort.", reply_markup=back_kb())
     await c.answer()
+
 
 @dp.message(S.custom_target)
 async def custom_inbox_target(m: Message, state: FSMContext):
     raw = (m.text or "").strip()
     username = raw.removeprefix("https://t.me/").removeprefix("http://t.me/").removeprefix("t.me/").lstrip("@").split("/")[0]
     if not re.fullmatch(r"[A-Za-z0-9_]{5,32}", username):
-        return await m.answer("❌ সঠিক Telegram username দিন, যেমন @username।")
+        return await m.answer("❌ Valid username দিন।")
     data = await state.get_data()
-    ids = data.get("custom_tg_ids") or ([data.get("custom_tg_id")] if data.get("custom_tg_id") else [])
+    ids = data.get("custom_tg_ids") or [data.get("custom_tg_id")]
     allowed = dict(user_clients(m.from_user.id))
     active = [tid for tid in ids if tid in allowed and getattr(allowed[tid][0], "is_connected", False)]
     if not active:
         await state.clear()
-        return await m.answer("❌ নির্বাচিত account-গুলো এখন offline। আবার শুরু করুন।", reply_markup=kb(m.from_user.id))
-    # Validate username against an authorized connected account. Store username so each
-    # user session resolves the recipient in its own peer cache during the send step.
+        return await m.answer("❌ Accounts offline.", reply_markup=kb(m.from_user.id))
     try:
         user = await allowed[active[0]][0].get_users(username)
         if getattr(user, "is_bot", False):
-            return await m.answer("❌ এই ফিচারে ব্যক্তিগত user account বেছে নিন, bot account নয়।")
+            return await m.answer("❌ Personal user account only.")
         if getattr(user, "is_deleted", False):
-            return await m.answer("❌ এই account আর ব্যবহারযোগ্য নয়। অন্য username দিন।")
+            return await m.answer("❌ Account not available.")
     except Exception as exc:
-        return await m.answer(f"❌ Username খুঁজে পাওয়া যায়নি: <code>{h(type(exc).__name__)}: {h(exc)}</code>\nআবার username দিন।")
+        return await m.answer(f"❌ Username not found: <code>{h(type(exc).__name__)}</code>")
     await state.update_data(custom_target_username=username, custom_target_name="@" + username, custom_tg_ids=active)
     await state.set_state(S.custom_payload)
-    await m.answer(f"✅ Recipient: <b>@{h(username)}</b>\n\nএখন একটি মেসেজ পাঠান—Text, Photo, Video, Audio, Voice, Document, Animation, Video Note বা Sticker।\nএকটি মেসেজই পাঠানো হবে; Album/একাধিক ফাইল সমর্থিত নয়।", reply_markup=back_kb())
+    await m.answer(f"✅ Recipient: <b>@{h(username)}</b>\n\nএখন একটি মেসেজ পাঠান — Text, Photo, Video, Audio, Voice, Document, Animation, Video Note বা Sticker।",
+                   reply_markup=back_kb())
+
 
 @dp.message(S.custom_payload)
 async def custom_inbox_payload(m: Message, state: FSMContext):
     data = await state.get_data()
-    media_obj = None
     kind = None
     extension = None
     if m.text and not m.text.startswith("/"):
         payload = {"kind": "text", "text": m.text}
         preview = f"📝 Text: {h(m.text[:700])}"
     else:
-        candidates = [
-            ("photo", m.photo[-1] if m.photo else None, ".jpg"),
-            ("video", m.video, ".mp4"), ("audio", m.audio, ".mp3"),
-            ("voice", m.voice, ".ogg"), ("video_note", m.video_note, ".mp4"),
-            ("document", m.document, ".bin"), ("animation", m.animation, ".mp4"),
-            ("sticker", m.sticker, ".webp"),
-        ]
-        for candidate_kind, obj, default_ext in candidates:
+        candidates = [("photo", m.photo[-1] if m.photo else None, ".jpg"),
+                      ("video", m.video, ".mp4"), ("audio", m.audio, ".mp3"),
+                      ("voice", m.voice, ".ogg"), ("video_note", m.video_note, ".mp4"),
+                      ("document", m.document, ".bin"), ("animation", m.animation, ".mp4"),
+                      ("sticker", m.sticker, ".webp")]
+        media_obj = None
+        for ck, obj, ext in candidates:
             if obj:
-                kind, media_obj, extension = candidate_kind, obj, default_ext
+                kind, media_obj, extension = ck, obj, ext
                 break
         if media_obj is None:
-            return await m.answer("❌ এই ধরনের মেসেজ সমর্থিত নয়। Text, Photo, Video, Audio, Voice বা Document পাঠান।")
+            return await m.answer("❌ Unsupported type.")
         original_name = getattr(media_obj, "file_name", None)
         if original_name:
-            supplied_ext = os.path.splitext(original_name)[1].lower()
-            if supplied_ext and len(supplied_ext) <= 10:
-                extension = supplied_ext
+            ext2 = os.path.splitext(original_name)[1].lower()
+            if ext2 and len(ext2) <= 10:
+                extension = ext2
         if kind == "sticker":
             if getattr(media_obj, "is_video", False): extension = ".webm"
             elif getattr(media_obj, "is_animated", False): extension = ".tgs"
         caption = m.caption or ""
         payload = {"kind": kind, "file_id": media_obj.file_id,
-                   "file_name": original_name or f"telegram_media{extension}",
                    "extension": extension, "caption": caption,
                    "file_size": getattr(media_obj, "file_size", None)}
         size = payload.get("file_size")
-        preview = f"📎 Media type: <b>{h(kind)}</b>"
-        if size: preview += f"\nSize: <code>{size / (1024 * 1024):.2f} MB</code>"
+        preview = f"📎 Media: <b>{h(kind)}</b>"
+        if size: preview += f"\nSize: {size / (1024 * 1024):.2f} MB"
         if caption: preview += f"\nCaption: {h(caption[:500])}"
     await state.update_data(custom_payload=payload)
     ids = data.get("custom_tg_ids") or [data.get("custom_tg_id")]
-    mode_line = f"🌐 ALL ACCOUNTS · <b>{len(ids)}</b>টি account" if data.get("custom_mode") == "all" else f"👤 Single account · <code>{ids[0]}</code>"
-    await m.answer(
-        hd("🔎", "Confirm message") + f"Mode: {mode_line}\nTo: <b>{h(data.get('custom_target_name'))}</b>\n\n{preview}\n\n"
-        "নিশ্চিত করুন: recipient আপনার কাছ থেকে এই মেসেজটি পেতে সম্মত।",
-        reply_markup=ikb([("✅ Confirm & Send", "csi:send", "success"), ("❌ Cancel", "csi:abort", "danger")]))
+    mode_line = f"🌐 ALL · {len(ids)} accounts" if data.get("custom_mode") == "all" else f"👤 Single · {ids[0]}"
+    await m.answer(hd("🔎", "Confirm message") + f"Mode: {mode_line}\nTo: <b>{h(data.get('custom_target_name'))}</b>\n\n{preview}\n\nনিশ্চিত করুন: recipient সম্মত।",
+                   reply_markup=ikb([("✅ Confirm & Send", "csi:send", "success"), ("❌ Cancel", "csi:abort", "danger")]))
+
 
 @dp.callback_query(F.data == "csi:abort")
 async def custom_inbox_abort(c: CallbackQuery, state: FSMContext):
     await state.clear()
-    await c.message.answer("❎ Custom Inbox send বাতিল করা হয়েছে।", reply_markup=kb(c.from_user.id))
+    await c.message.answer("❎ Cancelled.", reply_markup=kb(c.from_user.id))
     await c.answer("Cancelled")
+
 
 @dp.callback_query(F.data == "csi:send")
 async def custom_inbox_send(c: CallbackQuery, state: FSMContext):
     uid = c.from_user.id
     now = time.time()
     if now - CUSTOM_INBOX_LAST_SEND.get(uid, 0) < 10:
-        return await c.answer("নিরাপত্তার জন্য ১০ সেকেন্ড অপেক্ষা করুন।", show_alert=True)
+        return await c.answer("১০ সেকেন্ড অপেক্ষা করুন।", show_alert=True)
     data = await state.get_data()
-    ids = data.get("custom_tg_ids") or ([data.get("custom_tg_id")] if data.get("custom_tg_id") else [])
+    ids = data.get("custom_tg_ids") or [data.get("custom_tg_id")]
     target_username = data.get("custom_target_username")
     payload = data.get("custom_payload") or {}
     allowed = dict(user_clients(uid))
     ids = [tid for tid in ids if tid in allowed and getattr(allowed[tid][0], "is_connected", False)]
     if not ids or not target_username or not payload:
         await state.clear()
-        return await c.answer("Session expired বা account offline। আবার শুরু করুন।", show_alert=True)
+        return await c.answer("Session expired.", show_alert=True)
     await c.answer("Sending…")
     temp_path = None
     ok, fail, errors = [], [], []
@@ -1951,7 +1647,7 @@ async def custom_inbox_send(c: CallbackQuery, state: FSMContext):
         if kind != "text":
             file_info = await c.bot.get_file(payload["file_id"])
             extension = payload.get("extension") or ".bin"
-            fd, temp_path = tempfile.mkstemp(prefix="custom_inbox_", suffix=extension)
+            fd, temp_path = tempfile.mkstemp(prefix="ci_", suffix=extension)
             os.close(fd)
             await c.bot.download_file(file_info.file_path, destination=temp_path)
         for index, tg_id in enumerate(ids):
@@ -1959,23 +1655,22 @@ async def custom_inbox_send(c: CallbackQuery, state: FSMContext):
             try:
                 recipient = await app.get_users(target_username)
                 if getattr(recipient, "is_bot", False) or getattr(recipient, "is_deleted", False):
-                    raise ValueError("Recipient is not an available personal user account")
-                target_id = recipient.id
+                    raise ValueError("Not an available personal account")
+                tid = recipient.id
                 if kind == "text":
-                    await app.send_message(target_id, payload["text"], parse_mode=None, disable_web_page_preview=True)
+                    await app.send_message(tid, payload["text"], parse_mode=None, disable_web_page_preview=True)
                 else:
                     caption = payload.get("caption") or None
-                    if kind == "photo": await app.send_photo(target_id, temp_path, caption=caption, parse_mode=None)
-                    elif kind == "video": await app.send_video(target_id, temp_path, caption=caption, parse_mode=None, supports_streaming=True)
-                    elif kind == "audio": await app.send_audio(target_id, temp_path, caption=caption, parse_mode=None)
-                    elif kind == "voice": await app.send_voice(target_id, temp_path, caption=caption, parse_mode=None)
-                    elif kind == "video_note": await app.send_video_note(target_id, temp_path)
-                    elif kind == "document": await app.send_document(target_id, temp_path, caption=caption, parse_mode=None)
-                    elif kind == "animation": await app.send_animation(target_id, temp_path, caption=caption, parse_mode=None)
+                    if kind == "photo": await app.send_photo(tid, temp_path, caption=caption, parse_mode=None)
+                    elif kind == "video": await app.send_video(tid, temp_path, caption=caption, parse_mode=None, supports_streaming=True)
+                    elif kind == "audio": await app.send_audio(tid, temp_path, caption=caption, parse_mode=None)
+                    elif kind == "voice": await app.send_voice(tid, temp_path, caption=caption, parse_mode=None)
+                    elif kind == "video_note": await app.send_video_note(tid, temp_path)
+                    elif kind == "document": await app.send_document(tid, temp_path, caption=caption, parse_mode=None)
+                    elif kind == "animation": await app.send_animation(tid, temp_path, caption=caption, parse_mode=None)
                     elif kind == "sticker":
-                        if extension == ".tgs": raise ValueError("Animated TGS sticker upload is not supported; send static WEBP or WEBM instead.")
-                        await app.send_sticker(target_id, temp_path)
-                    else: raise ValueError(f"Unsupported media type: {kind}")
+                        if extension == ".tgs": raise ValueError("TGS sticker not supported")
+                        await app.send_sticker(tid, temp_path)
                 ok.append(tg_id)
             except FloodWait as exc:
                 fail.append(tg_id)
@@ -1983,26 +1678,24 @@ async def custom_inbox_send(c: CallbackQuery, state: FSMContext):
             except Exception as exc:
                 fail.append(tg_id)
                 errors.append(f"{tg_id}: {type(exc).__name__}: {exc}")
-                log.exception("custom inbox send failed for account %s", tg_id)
             if index < len(ids) - 1:
                 await asyncio.sleep(max(1, DELAY))
         CUSTOM_INBOX_LAST_SEND[uid] = time.time()
         await state.clear()
-        result = (f"✅ <b>Custom Inbox sending finished</b>\n\n👤 Recipient: <b>{h(data.get('custom_target_name'))}</b>\n"
-                  f"📤 Successful accounts: <b>{len(ok)}</b>\n❌ Failed accounts: <b>{len(fail)}</b>\n"
-                  f"📱 Total attempted: <b>{len(ids)}</b>")
-        if ok: result += "\n\n✅ Success IDs: <code>" + h(", ".join(map(str, ok))[:1200]) + "</code>"
-        if errors: result += "\n\n⚠️ Errors:\n<code>" + h("\n".join(errors)[:2500]) + "</code>"
+        result = (f"✅ <b>Done</b>\n\n👤 {h(data.get('custom_target_name'))}\n"
+                  f"📤 OK: <b>{len(ok)}</b>\n❌ Fail: <b>{len(fail)}</b>\n📱 Total: <b>{len(ids)}</b>")
+        if errors:
+            result += "\n\n⚠️ Errors:\n<code>" + h("\n".join(errors)[:2500]) + "</code>"
+        emit("custom_inbox", uid, ok=(not fail), detail=f"to=@{target_username} ok={len(ok)} fail={len(fail)}")
         await c.message.answer(result, reply_markup=kb(uid))
     except Exception as exc:
-        log.exception("custom inbox preparation failed")
-        await c.message.answer(f"❌ পাঠানোর প্রস্তুতি ব্যর্থ: <code>{h(type(exc).__name__)}: {h(exc)}</code>\nআবার চেষ্টা করুন।")
+        await c.message.answer(f"❌ Failed: <code>{h(type(exc).__name__)}: {h(exc)}</code>")
     finally:
         if temp_path and os.path.exists(temp_path):
             try: os.remove(temp_path)
-            except OSError: log.warning("Could not remove temporary media file: %s", temp_path)
+            except OSError: pass
 
-# ---------- NEW: Status button ----------
+
 @dp.message(ANY(B_STATUS))
 async def status_btn(m: Message):
     uid = m.from_user.id
@@ -2013,33 +1706,25 @@ async def status_btn(m: Message):
     av = sum(1 for (o, _c) in AUTO_VIEW if o == uid)
     await m.answer(hd("📊", "Status", "live snapshot") +
                    tree(f"{plan}", f"📱 Accounts — <b>{len(rows)}</b>", f"🟢 Online — <b>{on}</b>",
-                        f"🔴 Offline — <b>{len(rows) - on}</b>", f"⚡ Auto React chats — <b>{ar}</b>",
-                        f"👀 Auto View chats — <b>{av}</b>"),
+                        f"⚡ Auto React — <b>{ar}</b>", f"👀 Auto View — <b>{av}</b>"),
                    reply_markup=kb(uid))
 
 
-# ---------- NEW: Uptime button ----------
 @dp.message(ANY(B_UPTIME))
 async def uptime_btn(m: Message):
     secs = int(time.time() - BOOT_TIME)
     d, rem = divmod(secs, 86400)
     hrs, rem = divmod(rem, 3600)
     mins, sec = divmod(rem, 60)
-    parts = []
-    if d: parts.append(f"{d}d")
-    if hrs or d: parts.append(f"{hrs}h")
-    parts.append(f"{mins}m")
-    parts.append(f"{sec}s")
-    await m.answer(hd("🕒", "Uptime", "since the bot last started") + tree("🕒 Running — <b>" + " ".join(parts) + "</b>"),
+    parts = ([f"{d}d"] if d else []) + ([f"{hrs}h"] if hrs or d else []) + [f"{mins}m", f"{sec}s"]
+    await m.answer(hd("🕒", "Uptime") + tree("🕒 Running — <b>" + " ".join(parts) + "</b>"),
                    reply_markup=kb(m.from_user.id))
 
 
-# ---------- NEW: Find User button (admin only) ----------
 @dp.message(ANY(B_FIND))
 async def find_ask(m: Message, state: FSMContext):
     await state.set_state(S.find_user)
-    await m.answer(hd("🔍", "Find user", "search by ID or @username") + "Send a user ID or @username.\n\nSend /cancel to abort.",
-                   reply_markup=back_kb())
+    await m.answer(hd("🔍", "Find user") + "Send ID or @username.\n\n/cancel to abort.", reply_markup=back_kb())
 
 
 @dp.message(S.find_user)
@@ -2051,28 +1736,23 @@ async def find_do(m: Message, state: FSMContext):
     else:
         row = db.execute("SELECT user_id, name, username, status FROM users WHERE username=? COLLATE NOCASE", (q,)).fetchone()
     if not row:
-        return await m.answer("❌ No matching user found.", reply_markup=kb(m.from_user.id))
+        return await m.answer("❌ No user found.", reply_markup=kb(m.from_user.id))
     uid, name, uname, status = row
     n_acc = count("SELECT COUNT(*) FROM clients WHERE owner=?", uid)
     vip = "Yes" if is_vip(uid) else "No"
     icons = {"approved": "✅", "rejected": "❌", "revoked": "🚫", "banned": "⛔", "pending": "⏳"}
     await m.answer(hd("🔍", "User found") +
-                   tree(f"👤 Name — <b>{h(name or '—')}</b>", f"🔗 Username — <b>{h('@' + uname) if uname else '—'}</b>",
-                        f"🆔 ID — <b>{uid}</b>", f"{icons.get(status, '•')} Status — <b>{h(status)}</b>",
-                        f"💎 VIP — <b>{vip}</b>", f"📱 Accounts — <b>{n_acc}</b>") +
-                   f"\n\n🧰 <code>/ban {uid}</code>  ·  <code>/unban {uid}</code>", reply_markup=kb(m.from_user.id))
+                   tree(f"👤 {h(name or '—')}", f"🔗 @{h(uname) if uname else '—'}",
+                        f"🆔 {uid}", f"{icons.get(status, '•')} {h(status)}",
+                        f"💎 VIP: {vip}", f"📱 Accounts: {n_acc}") +
+                   f"\n\n🧰 <code>/ban {uid}</code> · <code>/unban {uid}</code>", reply_markup=kb(m.from_user.id))
 
 
-# ---------- NEW: Restart Accounts button ----------
 @dp.message(ANY(B_RESTART))
 async def restart_btn(m: Message):
     uid = m.from_user.id
-    rows = db.execute("SELECT id, session, owner FROM clients WHERE id IN (SELECT id FROM clients WHERE owner=? OR ?=?)",
-                       (uid, uid, OWNER_ID)).fetchall() if uid != OWNER_ID and not is_vip(uid) else \
-           db.execute("SELECT id, session, owner FROM clients").fetchall()
-    # restrict to accounts this user is allowed to control
     allowed_ids = {tid for tid, _ in user_clients(uid)} | {r[0] for r in client_rows(uid)}
-    rows = [r for r in rows if r[0] in allowed_ids]
+    rows = [r for r in db.execute("SELECT id, session, owner FROM clients").fetchall() if r[0] in allowed_ids]
     if not rows:
         return await m.answer("No accounts to restart.", reply_markup=kb(uid))
     await m.answer(f"⏳ Restarting {len(rows)} account(s)...")
@@ -2081,20 +1761,17 @@ async def restart_btn(m: Message):
         try:
             await start_client(fernet.decrypt(session_enc).decode(), tg_id, owner)
             ok += 1
-        except Exception as e:
+        except Exception:
             fail += 1
-            log.warning("restart %s failed: %r", tg_id, e)
         await asyncio.sleep(DELAY)
+    emit("restart", uid, ok=(fail == 0), detail=f"ok={ok} fail={fail}")
     await m.answer(f"🔄 Restart done.\n✅ OK: {ok}\n❌ Failed: {fail}", reply_markup=kb(uid))
 
 
-# ---------- NEW: Broadcast button (admin only) ----------
 @dp.message(ANY(B_BROADCAST))
 async def broadcast_ask(m: Message, state: FSMContext):
     await state.set_state(S.broadcast)
-    await m.answer(hd("📢", "Broadcast", "sent to every approved user") +
-                   "Send the message to broadcast to all approved users.\n\nSend /cancel to abort.",
-                   reply_markup=back_kb())
+    await m.answer(hd("📢", "Broadcast") + "Send the message.\n\n/cancel to abort.", reply_markup=back_kb())
 
 
 @dp.message(S.broadcast)
@@ -2109,44 +1786,40 @@ async def broadcast_do(m: Message, state: FSMContext):
         except Exception:
             fail += 1
         await asyncio.sleep(0.05)
-    await m.answer(f"📢 Broadcast sent.\n✅ Delivered: {ok}\n❌ Failed: {fail}", reply_markup=kb(m.from_user.id))
+    emit("broadcast", m.from_user.id, ok=(fail == 0), detail=f"ok={ok} fail={fail}")
+    await m.answer(f"📢 Broadcast sent.\n✅ {ok}\n❌ {fail}", reply_markup=kb(m.from_user.id))
 
 
-# ---------- NEW: My Info ----------
 @dp.message(ANY(B_INFO))
 async def my_info(m: Message):
     uid = m.from_user.id
     plan = "👑 Admin" if uid == OWNER_ID else ("💎 VIP" if is_vip(uid) else "🔐 Member")
     own = db.execute("SELECT COUNT(*) FROM clients WHERE owner=?", (uid,)).fetchone()[0]
     await m.answer(hd("🧮", "My info") +
-                   tree(f"👤 Name — <b>{h(m.from_user.full_name)}</b>",
-                        f"🔗 Username — <b>{h('@' + m.from_user.username) if m.from_user.username else '—'}</b>",
-                        f"🆔 ID — <b>{uid}</b>", f"{plan}", f"📱 My accounts — <b>{own}</b>"),
+                   tree(f"👤 {h(m.from_user.full_name)}",
+                        f"🔗 @{h(m.from_user.username) if m.from_user.username else '—'}",
+                        f"🆔 {uid}", plan, f"📱 My accounts: {own}"),
                    reply_markup=kb(uid))
 
 
-# ---------- NEW: Ping ----------
 @dp.message(ANY(B_PING))
 async def ping_btn(m: Message):
     t0 = time.time()
     sent = await m.answer("🏓 Pinging...")
     ms = int((time.time() - t0) * 1000)
-    try:
-        await sent.edit_text(hd("🏓", "Pong", f"{ms} ms"), reply_markup=None)
-    except Exception:
-        pass
+    try: await sent.edit_text(hd("🏓", "Pong", f"{ms} ms"))
+    except Exception: pass
     await m.answer("👆 Response time above.", reply_markup=kb(m.from_user.id))
 
 
-# ---------- NEW: Clear My Auto (nested confirm buttons) ----------
 @dp.message(ANY(B_CLEARAUTO))
 async def clearauto_ask(m: Message):
     uid = m.from_user.id
     n = sum(1 for (o, _c) in AUTO_REACT if o == uid) + sum(1 for (o, _c) in AUTO_VIEW if o == uid)
     if not n:
-        return await m.answer("Nothing to clear — you have no Auto React / Auto View set.", reply_markup=kb(uid))
-    await m.answer(hd("🧹", "Clear my auto settings", f"{n} rule(s) will be removed") +
-                   "Are you sure?", reply_markup=ikb([("✅ Yes, clear", "clra:yes", "danger"), ("❌ No", "clra:no")]))
+        return await m.answer("Nothing to clear.", reply_markup=kb(uid))
+    await m.answer(hd("🧹", "Clear my auto settings", f"{n} rule(s)") +
+                   "Are you sure?", reply_markup=ikb([("✅ Yes", "clra:yes", "danger"), ("❌ No", "clra:no")]))
 
 
 @dp.callback_query(F.data.startswith("clra:"))
@@ -2160,23 +1833,21 @@ async def clearauto_do(c: CallbackQuery):
     for k in [k for k in list(AUTO_VIEW) if k[0] == uid]:
         AUTO_VIEW.discard(k)
     db.execute("DELETE FROM auto2 WHERE owner=?", (uid,)); db.commit()
-    await c.message.edit_text("🧹 All your Auto React / Auto View rules were cleared.")
+    emit("auto_clear", uid, detail="all auto rules cleared")
+    await c.message.edit_text("🧹 Cleared.")
     await c.answer("Cleared")
 
 
-# ---------- NEW: Settings (nested submenu) ----------
 def v_settings(uid):
     is_admin = uid == OWNER_ID
     state_txt = "🔛 ON" if BOLD_MODE[0] else "🔚 OFF"
-    txt = hd("⚙", "Settings") + tree(f"🔠 Bold messages — <b>{state_txt}</b>")
+    txt = hd("⚙", "Settings") + tree(f"🔠 Bold — <b>{state_txt}</b>")
     if not is_admin:
-        return txt + "\n\nOnly the owner can change these.", ikb([("🔙 Close", "set:close")])
-    rows = [
-        [("🔠 Toggle Bold", "set:bold")],
-        [("💎 Emoji Manager", "set:manager"), ("💎 Set Pack (guide)", "set:spack")],
-        [("♻ Reset Emoji", "set:reset")],
-        [("🔙 Close", "set:close")],
-    ]
+        return txt + "\n\nOnly owner can change.", ikb([("🔙 Close", "set:close")])
+    rows = [[("🔠 Toggle Bold", "set:bold")],
+            [("💎 Emoji Manager", "set:manager"), ("💎 Set Pack (guide)", "set:spack")],
+            [("♻ Reset Emoji", "set:reset")],
+            [("🔙 Close", "set:close")]]
     return txt, ikb(*rows)
 
 
@@ -2200,35 +1871,27 @@ async def settings_cb(c: CallbackQuery):
         db.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('bold',?)", ("1" if BOLD_MODE[0] else "0",)); db.commit()
     elif act == "manager":
         txt, markup = v_emoji_manager(0)
-        try:
-            await c.message.edit_text(txt, reply_markup=markup)
-        except Exception:
-            await c.message.answer(txt, reply_markup=markup)
+        try: await c.message.edit_text(txt, reply_markup=markup)
+        except Exception: await c.message.answer(txt, reply_markup=markup)
         return await c.answer()
     elif act == "spack":
-        return await c.answer("Send /setpack <link> in the chat.", show_alert=True)
+        return await c.answer("Send /setpack <link> in chat.", show_alert=True)
     elif act == "reset":
         PREMIUM.clear()
         db.execute("DELETE FROM premium"); db.commit()
     txt, markup = v_settings(c.from_user.id)
-    try:
-        await c.message.edit_text(txt, reply_markup=markup)
-    except Exception:
-        pass
+    try: await c.message.edit_text(txt, reply_markup=markup)
+    except Exception: pass
     await c.answer("Updated")
 
 
-# ---------- NEW: Admin Tools (nested submenu, admin only) ----------
 def v_admtools():
     pend = count("SELECT COUNT(*) FROM users WHERE status='pending'")
-    txt = hd("🧰", "Admin tools", "quick shortcuts") + tree(f"📥 Pending requests — <b>{pend}</b>",
-                                                              f"🟢 Online accounts — <b>{len(RUNNING)}</b>")
-    rows = [
-        [("📥 Requests", "adm:req", "primary"), ("🔑 VIP Keys", "adm:keys", "success")],
-        [("👥 Users", "adm:users"), ("📱 Accounts", "adm:acc")],
-        [("🔠 Toggle Bold", "set:bold")],
-        [("🔙 Close", "set:close")],
-    ]
+    txt = hd("🧰", "Admin tools") + tree(f"📥 Pending — <b>{pend}</b>", f"🟢 Online — <b>{len(RUNNING)}</b>")
+    rows = [[("📥 Requests", "adm:req", "primary"), ("🔑 VIP Keys", "adm:keys", "success")],
+            [("👥 Users", "adm:users"), ("📱 Accounts", "adm:acc")],
+            [("🔠 Toggle Bold", "set:bold")],
+            [("🔙 Close", "set:close")]]
     return txt, ikb(*rows)
 
 
@@ -2240,14 +1903,12 @@ async def admtools_btn(m: Message):
     await m.answer(txt, reply_markup=markup)
 
 
-# ---------- NEW: Pin Post (admin) ----------
 @dp.message(ANY(B_PIN))
 async def pin_ask(m: Message, state: FSMContext):
     if m.from_user.id != OWNER_ID:
         return
     await state.set_state(S.pin_post)
-    await m.answer(hd("📌", "Pin post") + "Send the post link, e.g. https://t.me/channel/123\n\n"
-                   "The first available logged-in account that can see it will pin it.\n\nSend /cancel to abort.",
+    await m.answer(hd("📌", "Pin post") + "Send post link, e.g. https://t.me/channel/123\n\n/cancel to abort.",
                    reply_markup=back_kb())
 
 
@@ -2256,40 +1917,36 @@ async def pin_do(m: Message, state: FSMContext):
     await state.clear()
     post = parse_post(m.text)
     if not post:
-        return await m.answer("❌ Invalid post link.", reply_markup=kb(m.from_user.id))
+        return await m.answer("❌ Invalid link.", reply_markup=kb(m.from_user.id))
     chat, mid = post
     clients = user_clients(m.from_user.id)
     if not clients:
-        return await m.answer("❌ No logged-in accounts available.", reply_markup=kb(m.from_user.id))
+        return await m.answer("❌ No accounts.", reply_markup=kb(m.from_user.id))
     app = clients[0][1][0]
     try:
         await app.get_chat(chat)
         await app.pin_chat_message(chat, mid)
+        emit("pin", m.from_user.id, chat=str(chat), detail=f"post={mid}")
         await m.answer("📌 Pinned.", reply_markup=kb(m.from_user.id))
     except Exception as e:
-        await m.answer(f"❌ Pin failed: {h(e.__class__.__name__)}: {h(e)}", reply_markup=kb(m.from_user.id))
+        await m.answer(f"❌ Pin failed: {h(e)}", reply_markup=kb(m.from_user.id))
 
 
-# ---------- NEW: Clear Cache (admin) ----------
 @dp.message(ANY(B_CACHE))
 async def cache_btn(m: Message):
     if m.from_user.id != OWNER_ID:
         return
     n = len(SEEN)
     SEEN.clear()
-    await m.answer(f"🧊 Cleared {n} cached watcher entr{'y' if n == 1 else 'ies'}. "
-                   "Auto View / Auto React will re-baseline on the next check.", reply_markup=kb(m.from_user.id))
+    emit("cache_clear", m.from_user.id, detail=f"cleared {n}")
+    await m.answer(f"🧊 Cleared {n} cache entr{'y' if n == 1 else 'ies'}.", reply_markup=kb(m.from_user.id))
 
 
-# ---------- NEW: Developer contact ----------
 @dp.message(ANY(B_DEV))
 async def dev_btn(m: Message):
-    await m.answer(hd("👨‍💻", "Developer", "need help or want changes made?") +
-                   tree(f"📨 Contact — <b>{h(DEV_CONTACT)}</b>"),
-                   reply_markup=kb(m.from_user.id))
+    await m.answer(hd("👨‍💻", "Developer") + tree(f"📨 {h(DEV_CONTACT)}"), reply_markup=kb(m.from_user.id))
 
 
-# ---------- NEW: Emoji Manager (see all slots, change one at a time) ----------
 EMJ_PAGE_SIZE = 8
 
 
@@ -2314,14 +1971,14 @@ def v_emoji_manager(page=0):
         rows.append([(f"{e} {d}", f"emj:pick:{e}")])
     nav = []
     if page > 0:
-        nav.append((f"⬅ Prev", f"emj:page:{page - 1}"))
+        nav.append(("⬅ Prev", f"emj:page:{page - 1}"))
     nav.append((f"{page + 1}/{total_pages}", "emj:noop"))
     if page < total_pages - 1:
-        nav.append((f"Next ➡", f"emj:page:{page + 1}"))
+        nav.append(("Next ➡", f"emj:page:{page + 1}"))
     rows.append(nav)
     rows.append([("🔙 Close", "set:close")])
     txt = (hd("💎", "Emoji manager", "🟢 = premium set · ⚪ = default") + "\n".join(lines) +
-           "\n\nTap a row, then send one premium emoji to set it for that slot.")
+           "\n\nTap a row, then send one premium emoji.")
     return txt, ikb(*rows)
 
 
@@ -2343,20 +2000,16 @@ async def emoji_manager_cb(c: CallbackQuery, state: FSMContext):
         return await c.answer()
     if act == "page":
         txt, markup = v_emoji_manager(int(parts[2]))
-        try:
-            await c.message.edit_text(txt, reply_markup=markup)
-        except Exception:
-            pass
+        try: await c.message.edit_text(txt, reply_markup=markup)
+        except Exception: pass
         return await c.answer()
     if act == "pick":
         emoji = parts[2]
         await state.set_state(S.emoji_one)
         await state.update_data(slot_emoji=emoji)
         cur = PREMIUM.get(norm(emoji))
-        await c.message.answer(
-            f"💎 Setting the premium emoji for: {emoji}\n\n"
-            f"Current: {'set (id ' + h(cur) + ')' if cur else 'default (not set)'}\n\n"
-            "Send ONE premium emoji now to use it here, or /cancel to abort.", reply_markup=back_kb())
+        await c.message.answer(f"💎 Setting for {emoji}\nCurrent: {'set' if cur else 'default'}\n\nSend ONE premium emoji.",
+                               reply_markup=back_kb())
         return await c.answer()
 
 
@@ -2366,7 +2019,7 @@ async def emoji_one_do(m: Message, state: FSMContext):
     slot = data.get("slot_emoji")
     ents = [e for e in (m.entities or []) if e.type == "custom_emoji"]
     if not ents:
-        return await m.answer("❌ That wasn't a premium emoji. Send one premium emoji, or /cancel.")
+        return await m.answer("❌ Not a premium emoji.")
     cid = ents[0].custom_emoji_id
     PREMIUM[norm(slot)] = cid
     db.execute("INSERT OR REPLACE INTO premium(emoji,cid) VALUES(?,?)", (norm(slot), cid)); db.commit()
@@ -2376,24 +2029,23 @@ async def emoji_one_do(m: Message, state: FSMContext):
     await m.answer(txt, reply_markup=markup)
 
 
-# ---------- Access / Admin panel ----------
 @dp.message(ANY(B_ACC))
 async def access(m: Message):
     uid = m.from_user.id
     if uid == OWNER_ID:
         n = db.execute("SELECT COUNT(*) FROM clients").fetchone()[0]
-        return await m.answer(hd("👑", "Access", "full control") + tree("👑 Role — <b>Admin</b>", f"📱 Accounts — <b>{n}</b>"))
+        return await m.answer(hd("👑", "Access", "full control") + tree("👑 <b>Admin</b>", f"📱 Accounts — <b>{n}</b>"))
     own = db.execute("SELECT COUNT(*) FROM clients WHERE owner=?", (uid,)).fetchone()[0]
     if is_vip(uid):
         adm = db.execute("SELECT COUNT(*) FROM clients WHERE owner=?", (OWNER_ID,)).fetchone()[0]
-        return await m.answer(hd("💎", "Access", "vip unlocked") + tree("💎 Plan — <b>VIP</b>", f"📱 Your accounts — <b>{own}</b>", f"👑 Admin accounts — <b>{adm}</b>"))
-    await m.answer(hd("🔐", "Access", "standard member") + tree("🔐 Plan — <b>Member</b>", f"📱 Your accounts — <b>{own}</b>") + "\n\nHave a VIP key? Unlock all admin accounts.", reply_markup=VIP_BTN)
+        return await m.answer(hd("💎", "Access", "vip unlocked") + tree("💎 <b>VIP</b>", f"📱 Yours — <b>{own}</b>", f"👑 Admin — <b>{adm}</b>"))
+    await m.answer(hd("🔐", "Access", "standard") + tree("🔐 <b>Member</b>", f"📱 Yours — <b>{own}</b>") + "\n\nHave a VIP key? Unlock all admin accounts.", reply_markup=VIP_BTN)
 
 
 @dp.callback_query(F.data == "vip_enter")
 async def vip_enter(c: CallbackQuery, state: FSMContext):
     await state.set_state(S.vip_key)
-    await c.message.answer(hd("🔑", "VIP key", "paste the key from the admin") + "/cancel to abort.", reply_markup=back_kb())
+    await c.message.answer(hd("🔑", "VIP key") + "/cancel to abort.", reply_markup=back_kb())
     await c.answer()
 
 
@@ -2401,10 +2053,10 @@ async def vip_enter(c: CallbackQuery, state: FSMContext):
 async def vip_redeem(m: Message, state: FSMContext):
     key = (m.text or "").strip().upper()
     row = db.execute("SELECT status FROM access_keys WHERE key=?", (key,)).fetchone()
-    try: await m.delete()   # hide the key from chat
+    try: await m.delete()
     except Exception: pass
     if not row or row[0] != "active":
-        return await m.answer("❌ Invalid or already used key. Send a valid key, or /cancel.")
+        return await m.answer("❌ Invalid key, or /cancel.")
     u = m.from_user
     db.execute("UPDATE access_keys SET status='used', used_by=?, used_at=? WHERE key=?", (u.id, int(time.time()), key))
     db.execute("INSERT OR REPLACE INTO vip_users(user_id,key) VALUES(?,?)", (u.id, key))
@@ -2413,11 +2065,10 @@ async def vip_redeem(m: Message, state: FSMContext):
     db.commit()
     await state.clear()
     n = db.execute("SELECT COUNT(*) FROM clients WHERE owner=?", (OWNER_ID,)).fetchone()[0]
-    await m.answer(hd("🎉", "VIP activated") + tree("💎 Plan — <b>VIP</b>", f"👑 Admin accounts — <b>{n}</b>"), reply_markup=kb(u.id))
-    try:
-        await m.bot.send_message(OWNER_ID, f"💎 Key <code>{key}</code> used by {h(u.full_name)} | 🆔 {u.id}")
-    except Exception:
-        pass
+    emit("vip_used", u.id, detail=f"key {key} activated")
+    await m.answer(hd("🎉", "VIP activated") + tree("💎 <b>VIP</b>", f"👑 Admin accounts — <b>{n}</b>"), reply_markup=kb(u.id))
+    try: await m.bot.send_message(OWNER_ID, f"💎 Key <code>{key}</code> used by {h(u.full_name)} | 🆔 {u.id}")
+    except Exception: pass
 
 
 def count(sql, *a):
@@ -2428,7 +2079,7 @@ def v_panel():
     pend = count("SELECT COUNT(*) FROM users WHERE status='pending'")
     appr = count("SELECT COUNT(*) FROM users WHERE status='approved'")
     vips = count("SELECT COUNT(*) FROM vip_users")
-    txt = (hd("👑", "Admin console", "control everything from here") +
+    txt = (hd("👑", "Admin console", "control everything") +
            tree(f"👥 Users — <b>{appr}</b>", f"💎 VIP — <b>{vips}</b>", f"⏳ Pending — <b>{pend}</b>",
                 f"📱 Accounts — <b>{count('SELECT COUNT(*) FROM clients')}</b>",
                 f"🟢 Online — <b>{len(RUNNING)}</b>"))
@@ -2439,7 +2090,7 @@ def v_panel():
 
 def v_req():
     rows = db.execute("SELECT user_id, name, username FROM users WHERE status='pending'").fetchall()
-    txt = hd("📥", "Requests", "waiting for approval") + ("\n".join(f"• {h(n or '—')} | 🆔 {i}" for i, n, _u in rows) if rows else "No pending requests.")
+    txt = hd("📥", "Requests") + ("\n".join(f"• {h(n or '—')} | 🆔 {i}" for i, n, _u in rows) if rows else "No pending.")
     btns = [[(f"✅ {(n or str(i))[:14]}", f"adm:ap:{i}", "success"), (f"❌ {(n or str(i))[:14]}", f"adm:rj:{i}", "danger")]
             for i, n, _u in rows[:30]]
     return txt, ikb(*btns, [("🔙 Back", "adm:home")])
@@ -2448,7 +2099,7 @@ def v_req():
 def v_users():
     rows = db.execute("SELECT user_id, name, status FROM users WHERE status!='pending' ORDER BY status").fetchall()
     icons = {"approved": "✅", "rejected": "❌", "revoked": "🚫", "banned": "⛔"}
-    txt = hd("👥", "Users") + ("\n".join(f"{icons.get(s, '•')} {h(n or '—')} | 🆔 {i}" for i, n, s in rows) if rows else "No users yet.")
+    txt = hd("👥", "Users") + ("\n".join(f"{icons.get(s, '•')} {h(n or '—')} | 🆔 {i}" for i, n, s in rows) if rows else "No users.")
     btns = []
     for i, n, s in rows[:30]:
         nm = (n or str(i))[:14]
@@ -2470,7 +2121,7 @@ def v_acc():
     for o, items in groups.items():
         parts.append(f"👥 {h(owner_name(o))} ({len(items)})\n" + "\n".join(
             f"   {'🟢' if c in RUNNING else '🔴'} {h(n)}" for c, n in items))
-    body = "\n\n".join(parts) or "No accounts yet."
+    body = "\n\n".join(parts) or "No accounts."
     if len(body) > 3500:
         body = body[:3500] + "\n…"
     return hd("📱", f"All accounts · {len(rows)}") + f"<blockquote expandable>{body}</blockquote>", ikb([("🔙 Back", "adm:home")])
@@ -2478,44 +2129,37 @@ def v_acc():
 
 def v_activity():
     rows = db.execute("""
-        SELECT u.user_id, COALESCE(u.name, CAST(u.user_id AS TEXT)), COALESCE(u.status,'unknown'),
+        SELECT u.user_id, COALESCE(u.name, CAST(u.user_id AS TEXT)),
                COUNT(a.id), MAX(a.created)
         FROM users u LEFT JOIN activity a ON a.user_id=u.user_id
         GROUP BY u.user_id ORDER BY COALESCE(MAX(a.created),0) DESC LIMIT 40
     """).fetchall()
-    txt = hd("📈", "User activity", "select a user to inspect their history")
+    txt = hd("📈", "User activity")
     btns = []
-    for uid, name, status, total, last in rows:
-        stamp = time.strftime("%Y-%m-%d %H:%M", time.localtime(last)) if last else "No activity"
-        btns.append([(f"{name[:18]} · {total} events", f"adm:actuser:{uid}")])
+    for uid, name, total, _last in rows:
+        btns.append([(f"{(name or str(uid))[:18]} · {total} events", f"adm:actuser:{uid}")])
     if not btns:
-        txt += "No user activity yet."
+        txt += "No activity yet."
     return txt, ikb(*btns, [("🔙 Back", "adm:home")])
 
 
 def v_activity_user(uid):
     row = db.execute("SELECT name, username, status FROM users WHERE user_id=?", (uid,)).fetchone()
-    name, username, status = row if row else (str(uid), "", "owner/unknown")
+    name, username, status = row if row else (str(uid), "", "unknown")
     added = count("SELECT COUNT(*) FROM activity WHERE user_id=? AND action='account_added'", uid)
     joins = count("SELECT COUNT(*) FROM activity WHERE user_id=? AND action='voice_join'", uid)
     leaves = count("SELECT COUNT(*) FROM activity WHERE user_id=? AND action='voice_leave'", uid)
     total_accounts = count("SELECT COUNT(*) FROM clients WHERE owner=?", uid)
     events = db.execute("SELECT action,details,created FROM activity WHERE user_id=? ORDER BY created DESC LIMIT 15", (uid,)).fetchall()
-    lines = []
-    for action, details, stamp in events:
-        when = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(stamp))
-        lines.append(f"• <b>{h(action)}</b> — {h(details)}\n  <i>{when}</i>")
-    body = "\\n".join(lines) if lines else "No recorded activity."
-    txt = (hd("👤", "User activity details") +
-           tree(f"Name — <b>{h(name)}</b>", f"Username — <b>@{h(username) if username else '—'}</b>",
-                f"User ID — <code>{uid}</code>", f"Access — <b>{h(status)}</b>",
-                f"Accounts currently saved — <b>{total_accounts}</b>",
-                f"Accounts added (logged) — <b>{added}</b>",
-                f"Voice join attempts — <b>{joins}</b>", f"Voice leave attempts — <b>{leaves}</b>",
-                f"All recorded events — <b>{count('SELECT COUNT(*) FROM activity WHERE user_id=?', uid)}</b>") +
-           "\\n\\n<b>Recent activity (latest 15)</b>\\n" + body)
-    if len(txt) > 3900:
-        txt = txt[:3900] + "\\n…"
+    lines = [f"• <b>{h(a)}</b> — {h(d)}\n  <i>{time.strftime('%Y-%m-%d %H:%M', time.localtime(ts))}</i>" for a, d, ts in events]
+    body = "\n".join(lines) if lines else "No activity."
+    txt = (hd("👤", "Activity details") +
+           tree(f"👤 {h(name)}", f"🔗 @{h(username) if username else '—'}", f"🆔 {uid}",
+                f"Status: {h(status)}", f"Accounts: <b>{total_accounts}</b>",
+                f"Added: <b>{added}</b>", f"VC joins: <b>{joins}</b>", f"VC leaves: <b>{leaves}</b>",
+                f"Total events: <b>{count('SELECT COUNT(*) FROM activity WHERE user_id=?', uid)}</b>") +
+           "\n\n<b>Recent</b>\n" + body)
+    if len(txt) > 3900: txt = txt[:3900] + "\n…"
     return txt, ikb([("🔙 All activity", "adm:activity")], [("🏠 Admin home", "adm:home")])
 
 
@@ -2523,14 +2167,11 @@ def v_keys(new=None):
     rows = db.execute("SELECT key, status, used_by FROM access_keys ORDER BY created DESC LIMIT 30").fetchall()
     lines = []
     for k, st, ub in rows:
-        if st == "active":
-            lines.append(f"🟢 <code>{k}</code> — unused")
-        elif st == "used":
-            lines.append(f"💎 <code>{k}</code> — {h(owner_name(ub))} ({ub})")
-        else:
-            lines.append(f"⛔ <code>{k}</code> — revoked")
-    head = f"🎉 <b>New key</b>  · tap to copy\n<code>{new}</code>\n\n" if new else ""
-    txt = head + hd("🔑", "VIP keys", "one key = one person · unlocks ALL admin accounts") + ("\n".join(lines) or "No keys yet.")
+        if st == "active": lines.append(f"🟢 <code>{k}</code> — unused")
+        elif st == "used": lines.append(f"💎 <code>{k}</code> — {h(owner_name(ub))} ({ub})")
+        else: lines.append(f"⛔ <code>{k}</code> — revoked")
+    head = f"🎉 <b>New key</b>\n<code>{new}</code>\n\n" if new else ""
+    txt = head + hd("🔑", "VIP keys") + ("\n".join(lines) or "No keys.")
     btns = [[("➕ Generate New Key", "adm:kg", "success")]]
     for k, st, _ub in rows[:20]:
         if st != "revoked":
@@ -2541,10 +2182,8 @@ def v_keys(new=None):
 
 async def show(c: CallbackQuery, view):
     text, markup = view
-    try:
-        await c.message.edit_text(text, reply_markup=markup)
-    except Exception:
-        await c.message.answer(text, reply_markup=markup)
+    try: await c.message.edit_text(text, reply_markup=markup)
+    except Exception: await c.message.answer(text, reply_markup=markup)
 
 
 @dp.message(ANY(B_ADMIN))
@@ -2561,10 +2200,8 @@ async def admin_cb(c: CallbackQuery):
         await _admin_cb(c)
     except Exception as e:
         log.exception("admin_cb failed")
-        try:
-            await c.answer(f"⚠️ {type(e).__name__}: {e}"[:190], show_alert=True)
-        except Exception:
-            pass
+        try: await c.answer(f"⚠️ {type(e).__name__}: {e}"[:190], show_alert=True)
+        except Exception: pass
 
 
 async def _admin_cb(c: CallbackQuery):
@@ -2579,19 +2216,17 @@ async def _admin_cb(c: CallbackQuery):
         if act != "ap":
             db.execute("DELETE FROM vip_users WHERE user_id=?", (uid,))
         db.commit()
-        msg = {"ap": "✅ Your access request has been approved!\n\nSend /start to begin.",
-               "rj": "❌ Your access request was rejected by the bot owner.",
-               "rv": "🚫 Your access has been revoked by the bot owner.",
-               "bn": "⛔ You have been permanently banned from this bot by the owner.",
-               "ub": "✅ Your ban has been lifted. Send /start to request access again."}[act]
-        try:
-            await c.bot.send_message(uid, msg)
-        except Exception:
-            pass
+        emit(f"user_{status}", uid, detail="by owner via panel")
+        msg = {"ap": "✅ Approved! Send /start to begin.",
+               "rj": "❌ Rejected.",
+               "rv": "🚫 Access revoked.",
+               "bn": "⛔ Permanently banned.",
+               "ub": "✅ Ban lifted. Send /start."}[act]
+        try: await c.bot.send_message(uid, msg)
+        except Exception: pass
         head = c.message.text or ""
         if head.startswith("🔔"):
-            result = {"ap": "✅ Accepted", "rj": "❌ Rejected", "rv": "🚫 Revoked"}[act]
-            await c.message.edit_text(f"{h(head)}\n\n{result}")
+            await c.message.edit_text(f"{h(head)}\n\n{ {'ap': '✅ Accepted', 'rj': '❌ Rejected', 'rv': '🚫 Revoked'}[act] }")
         elif head.startswith("📥"):
             await show(c, v_req())
         else:
@@ -2607,11 +2242,12 @@ async def _admin_cb(c: CallbackQuery):
         if r and r[0]:
             db.execute("DELETE FROM vip_users WHERE user_id=?", (r[0],))
             db.execute("UPDATE users SET status='revoked' WHERE user_id=?", (r[0],))
-            try: await c.bot.send_message(r[0], "🚫 Your VIP access has been revoked by the bot owner.")
+            try: await c.bot.send_message(r[0], "🚫 VIP revoked.")
             except Exception: pass
         db.commit()
+        emit("key_revoked", r[0] if r else None, detail=f"key {key} revoked")
         await show(c, v_keys())
-        return await c.answer("Key revoked")
+        return await c.answer("Revoked")
     if act == "activity":
         await show(c, v_activity())
         return await c.answer()
@@ -2624,19 +2260,329 @@ async def _admin_cb(c: CallbackQuery):
     await c.answer()
 
 
-# ---------- boot ----------
+# =====================================================================
+#  SUPER ADMIN BOT  (running as: python main.py super)
+# =====================================================================
+def s_one(sql, *a):
+    r = db.execute(sql, a).fetchone()
+    return r[0] if r else 0
+
+
+def s_stats():
+    now = int(time.time())
+    started = s_one("SELECT started FROM bot_state WHERE proc='main'") or 0
+    hb = s_one("SELECT heartbeat FROM bot_state WHERE proc='main'") or 0
+    up = now - started if started else 0
+    d, rem = divmod(max(0, up), 86400)
+    hrs, rem = divmod(rem, 3600)
+    mn, _ = divmod(rem, 60)
+    return dict(
+        users=s_one("SELECT COUNT(*) FROM users WHERE status='approved'"),
+        vip=s_one("SELECT COUNT(*) FROM vip_users"),
+        pend=s_one("SELECT COUNT(*) FROM users WHERE status='pending'"),
+        clients=s_one("SELECT COUNT(*) FROM clients"),
+        events=s_one("SELECT COUNT(*) FROM events"),
+        vjoin=s_one("SELECT COUNT(*) FROM events WHERE kind='voice_join'"),
+        vleave=s_one("SELECT COUNT(*) FROM events WHERE kind='voice_leave'"),
+        errs=s_one("SELECT COUNT(*) FROM events WHERE kind='error'"),
+        newacc=s_one("SELECT COUNT(*) FROM events WHERE kind='account_added'"),
+        cmds=s_one("SELECT COUNT(*) FROM events WHERE kind='cmd'"),
+        watch=s_one("SELECT COUNT(*) FROM events WHERE kind='watcher'"),
+        alive=bool(hb) and (now - hb) < 60,
+        uptime=f"{d}d {hrs}h {mn}m" if started else "not running",
+        last_event=s_one("SELECT MAX(ts) FROM events") or 0,
+    )
+
+
+def s_dash_text():
+    s = s_stats()
+    alive = "🟢 ALIVE" if s["alive"] else "🔴 DOWN ⚠️"
+    last = time.strftime("%H:%M:%S", time.localtime(s["last_event"])) if s["last_event"] else "—"
+    return (
+        "👑 <b>SUPER ADMIN MONITOR</b>\n▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n\n"
+        f"📡 Deploy: <code>{h(DEPLOY_ID)}</code>\n"
+        f"🟢 Main bot: <b>{alive}</b>\n"
+        f"🕒 Uptime: <b>{s['uptime']}</b>\n"
+        f"📨 Last event: <b>{last}</b>\n\n"
+        f"👥 Approved: <b>{s['users']}</b>\n"
+        f"💎 VIP: <b>{s['vip']}</b>  ·  ⏳ Pending: <b>{s['pend']}</b>\n"
+        f"📱 Accounts: <b>{s['clients']}</b>\n\n"
+        f"🎧 VC joins: <b>{s['vjoin']}</b>  ·  🔇 leaves: <b>{s['vleave']}</b>\n"
+        f"➕ Accounts added: <b>{s['newacc']}</b>\n"
+        f"🖱 Commands: <b>{s['cmds']}</b>\n"
+        f"👀 Watcher: <b>{s['watch']}</b>\n"
+        f"❌ Errors: <b>{s['errs']}</b>\n"
+        f"📜 Total events: <b>{s['events']}</b>\n\n"
+        f"<i>auto-refresh every {int(REFRESH)}s · {time.strftime('%H:%M:%S')}</i>"
+    )
+
+
+def s_dash_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔄 Refresh", callback_data="r"),
+         InlineKeyboardButton(text="📜 Live feed", callback_data="feed")],
+        [InlineKeyboardButton(text="❌ Errors", callback_data="errs"),
+         InlineKeyboardButton(text="👥 Users", callback_data="users")],
+        [InlineKeyboardButton(text="📱 Accounts", callback_data="accs"),
+         InlineKeyboardButton(text="📡 Deployments", callback_data="deps")],
+        [InlineKeyboardButton(text="⛔ STOP this bot", callback_data="stopbot")],
+    ])
+
+
+def s_recent(n=15, kind=None):
+    q = "SELECT ts,user_id,kind,detail,ok FROM events"
+    a = ()
+    if kind:
+        q += " WHERE kind=?"; a = (kind,)
+    q += " ORDER BY id DESC LIMIT ?"; a += (n,)
+    return db.execute(q, a).fetchall()
+
+
+def s_feed_text():
+    rows = s_recent(20)
+    body = "\n".join(
+        f"{'✅' if ok else '❌'} <code>{time.strftime('%H:%M:%S', time.localtime(ts))}</code> "
+        f"<b>{h(kind)}</b> · {uid or '—'} · {h(detail)[:90]}"
+        for ts, uid, kind, detail, ok in rows)
+    return "📜 <b>Live feed (latest 20)</b>\n\n" + (body or "no events yet")
+
+
+def s_errors_text():
+    rows = s_recent(10, "error")
+    body = "\n".join(f"• <code>{time.strftime('%H:%M', time.localtime(ts))}</code> {h(detail)[:180]}"
+                     for ts, uid, kind, detail, ok in rows)
+    return "❌ <b>Recent errors</b>\n\n" + (body or "no errors 🎉")
+
+
+def s_users_text():
+    rows = db.execute("SELECT user_id, name, username, status FROM users ORDER BY "
+                      "CASE status WHEN 'pending' THEN 0 WHEN 'approved' THEN 1 ELSE 2 END, user_id").fetchall()
+    icons = {"approved": "✅", "pending": "⏳", "rejected": "❌", "revoked": "🚫", "banned": "⛔"}
+    body = "\n".join(f"{icons.get(st, '•')} {h(n or '—')} | @{h(u) if u else '—'} | <code>{i}</code>"
+                     for i, n, u, st in rows[:40])
+    return f"👥 <b>Users ({len(rows)})</b>\n\n" + (body or "no users")
+
+
+def s_accs_text():
+    rows = db.execute("SELECT id, name, owner FROM clients ORDER BY owner, name").fetchall()
+    groups = {}
+    for cid, n, o in rows:
+        groups.setdefault(o, []).append((cid, n))
+    parts = []
+    for o, items in groups.items():
+        parts.append(f"👥 owner <code>{o}</code> ({len(items)})\n" +
+                     "\n".join(f"   • {h(n)} · <code>{c}</code>" for c, n in items))
+    body = "\n\n".join(parts) or "no accounts yet"
+    if len(body) > 3800:
+        body = body[:3800] + "\n…"
+    return f"📱 <b>All accounts ({len(rows)})</b>\n\n{body}"
+
+
+def s_deps_text():
+    rows = db.execute("SELECT proc, heartbeat FROM bot_state WHERE proc LIKE 'deploy:%'").fetchall()
+    now = int(time.time())
+    lines = []
+    for proc, hb in rows:
+        dep = proc.split(":", 1)[1]
+        on = (now - (hb or 0)) < 90
+        lines.append(f"{'🟢' if on else '🔴'} <b>{h(dep)}</b> · last seen {now - (hb or now)}s ago")
+    return "📡 <b>Deployments</b>\n\n" + ("\n".join(lines) or "no remote deployments seen")
+
+
+async def super_main():
+    if not SUPER_TOKEN or not SUPER_ID:
+        raise SystemExit("❌ SUPER_ADMIN_TOKEN and SUPER_ADMIN_ID must be set in env to run: python main.py super.")
+    sbot = Bot(SUPER_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    sdp = Dispatcher()
+    db.execute("INSERT OR REPLACE INTO bot_state(proc,started,heartbeat,version) VALUES('super',?,?,'1.0')",
+               (int(time.time()), int(time.time())))
+    db.commit()
+    dash = {}
+    last_seen = [0]
+    PUSH_KINDS = {"account_added", "error", "voice_join", "voice_leave", "boot", "bulk",
+                  "access_request", "ban", "deleteuser", "vip_used", "vip_key"}
+
+    async def refresh_loop():
+        while True:
+            try:
+                key = (s_stats()["events"], s_stats()["alive"], s_stats()["clients"])
+                for cid, (mid, last) in list(dash.items()):
+                    if last == key: continue
+                    try:
+                        await sbot.edit_message_text(chat_id=cid, message_id=mid, text=s_dash_text(), reply_markup=s_dash_kb())
+                        dash[cid] = (mid, key)
+                    except Exception: pass
+            except Exception: pass
+            await asyncio.sleep(REFRESH)
+
+    async def push_loop():
+        cutoff = int(time.time()) - PUSH_WINDOW
+        last_seen[0] = s_one("SELECT COALESCE(MAX(id),0) FROM events WHERE ts>=?", cutoff)
+        while True:
+            try:
+                q = ("SELECT id,ts,user_id,kind,chat,detail,ok FROM events WHERE id>? AND kind IN ("
+                     + ",".join("?" * len(PUSH_KINDS)) + ") ORDER BY id LIMIT 50")
+                rows = db.execute(q, (last_seen[0], *PUSH_KINDS)).fetchall()
+                for eid, ts, uid, kind, chat, detail, ok in rows:
+                    last_seen[0] = eid
+                    icon = {"account_added": "➕", "error": "❌", "voice_join": "🎧", "voice_leave": "🔇",
+                            "boot": "🟢", "bulk": "📦", "access_request": "🙋", "ban": "⛔",
+                            "deleteuser": "🗑", "vip_used": "💎", "vip_key": "🔑"}.get(kind, "•")
+                    text = (f"{icon} <b>{h(kind)}</b>\n👤 <code>{uid or '—'}</code>\n"
+                            f"📝 {h(detail)[:300]}\n🕒 {time.strftime('%H:%M:%S', time.localtime(ts))}")
+                    if chat: text += f"\n💬 <code>{h(chat)}</code>"
+                    try: await sbot.send_message(SUPER_ID, text)
+                    except Exception: pass
+            except Exception: pass
+            await asyncio.sleep(2)
+
+    @sdp.message(CommandStart())
+    async def s_start(m: Message):
+        if m.from_user.id != SUPER_ID:
+            return await m.answer("⛔ This monitor is private.")
+        sent = await m.answer(s_dash_text(), reply_markup=s_dash_kb())
+        dash[m.chat.id] = (sent.message_id, (s_stats()["events"], s_stats()["alive"], s_stats()["clients"]))
+        await m.answer(f"🔴 Live monitoring on. Auto-edits every {int(REFRESH)}s.\n\n"
+                       "Commands:\n/stats /tail /errors /users /accounts /deps\n\n"
+                       "Remote control (if SUPER_CHAT_ID is set on the target):\n"
+                       "<code>/remote CUST-001 stop</code>\n"
+                       "<code>/remote CUST-001 clear</code>\n"
+                       "<code>/remote CUST-001 status</code>\n"
+                       "<code>/remote CUST-001 notify hello</code>\n"
+                       "<code>/remote CUST-001 restart</code>")
+
+    @sdp.message(Command("stats"))
+    async def s_stats_cmd(m: Message):
+        if m.from_user.id != SUPER_ID: return
+        sent = await m.answer(s_dash_text(), reply_markup=s_dash_kb())
+        dash[m.chat.id] = (sent.message_id, (s_stats()["events"], s_stats()["alive"], s_stats()["clients"]))
+
+    @sdp.message(Command("tail"))
+    async def s_tail(m: Message):
+        if m.from_user.id == SUPER_ID:
+            await m.answer(s_feed_text())
+
+    @sdp.message(Command("errors"))
+    async def s_errors_cmd(m: Message):
+        if m.from_user.id == SUPER_ID:
+            await m.answer(s_errors_text())
+
+    @sdp.message(Command("users"))
+    async def s_users_cmd(m: Message):
+        if m.from_user.id == SUPER_ID:
+            await m.answer(s_users_text())
+
+    @sdp.message(Command("accounts"))
+    async def s_accs_cmd(m: Message):
+        if m.from_user.id == SUPER_ID:
+            await m.answer(s_accs_text())
+
+    @sdp.message(Command("deps"))
+    async def s_deps_cmd(m: Message):
+        if m.from_user.id == SUPER_ID:
+            await m.answer(s_deps_text())
+
+    @sdp.message(Command("remote"))
+    async def s_remote(m: Message):
+        if m.from_user.id != SUPER_ID: return
+        parts = (m.text or "").split()
+        if len(parts) < 3:
+            return await m.answer("Usage: /remote <DEPLOY_ID> <stop|clear|status|restart|notify> [text]")
+        dep, cmd = parts[1], parts[2].lower()
+        if dep != DEPLOY_ID:
+            return await m.answer(f"ℹ️ This monitor is bound to <code>{DEPLOY_ID}</code>, not <code>{dep}</code>.\n"
+                                   "Run a separate super instance for that deployment (or use SUPER_CHAT_ID).")
+        if cmd == "stop":
+            BLOCKED[0] = True
+            emit("shutdown", None, detail=f"remote stop requested for {DEPLOY_ID}")
+            await m.answer(f"⛔ Stop queued for {DEPLOY_ID}. It will exit within ~5s.")
+        elif cmd == "clear":
+            BLOCKED[0] = False
+            await m.answer(f"✅ {DEPLOY_ID} unblocked.")
+        elif cmd == "status":
+            await m.answer(f"📊 {DEPLOY_ID}\nclients={len(RUNNING)}\nuptime={int(time.time()-BOOT_TIME)}s\nblocked={BLOCKED[0]}")
+        elif cmd == "restart":
+            for tg_id, session_enc, owner in db.execute("SELECT id, session, owner FROM clients").fetchall():
+                try:
+                    await start_client(fernet.decrypt(session_enc).decode(), tg_id, owner or OWNER_ID)
+                except Exception:
+                    pass
+            emit("restart", None, detail="remote restart")
+            await m.answer(f"🔄 Restart done for {DEPLOY_ID}.")
+        elif cmd == "notify":
+            txt = m.text.split(cmd, 1)[1].strip() or "no text"
+            try:
+                await BOT_INSTANCE.send_message(OWNER_ID, f"📨 {DEPLOY_ID} notice:\n{txt}")
+                await m.answer("✅ notice delivered.")
+            except Exception as e:
+                await m.answer(f"❌ {e}")
+        else:
+            await m.answer("Unknown command.")
+
+    @sdp.callback_query(F.data.in_({"r", "feed", "errs", "users", "accs", "deps", "stopbot"}))
+    async def s_cb(c: CallbackQuery):
+        if c.from_user.id != SUPER_ID:
+            return await c.answer("⛔", show_alert=True)
+        if c.data == "r":
+            try: await c.message.edit_text(s_dash_text(), reply_markup=s_dash_kb())
+            except Exception: pass
+        elif c.data == "feed": await c.message.answer(s_feed_text())
+        elif c.data == "errs": await c.message.answer(s_errors_text())
+        elif c.data == "users": await c.message.answer(s_users_text())
+        elif c.data == "accs": await c.message.answer(s_accs_text())
+        elif c.data == "deps": await c.message.answer(s_deps_text())
+        elif c.data == "stopbot":
+            BLOCKED[0] = True
+            emit("shutdown", None, detail=f"stopbot via super panel for {DEPLOY_ID}")
+            await c.message.answer(f"⛔ Stop queued for {DEPLOY_ID}. It will exit within ~5s.")
+        await c.answer("ok")
+
+    asyncio.create_task(refresh_loop())
+    asyncio.create_task(push_loop())
+    await sdp.start_polling(sbot)
+
+
+# ---------- main bot entrypoint ----------
+async def _watchdog():
+    while True:
+        if BLOCKED[0]:
+            log.warning("BLOCKED by super admin — shutting down main bot")
+            for tid in list(RUNNING.keys()):
+                try: await stop_client(tid)
+                except Exception: pass
+            emit("shutdown", None, detail=f"blocked for {DEPLOY_ID}")
+            os._exit(0)
+        await asyncio.sleep(5)
+
+
+async def heartbeat_to_group(sbot):
+    if not SUPER_CHAT:
+        return
+    await asyncio.sleep(5)
+    while True:
+        try:
+            db.execute("INSERT OR REPLACE INTO bot_state(proc,started,heartbeat,version) VALUES(?,?,?,?)",
+                       (f"deploy:{DEPLOY_ID}", int(BOOT_TIME), int(time.time()), "1.0"))
+            db.commit()
+            txt = (f"💓 <b>{h(DEPLOY_ID)}</b> | online\n"
+                   f"📱 clients: <b>{len(RUNNING)}</b>\n"
+                   f"🕒 uptime: <b>{int(time.time() - BOOT_TIME)}s</b>")
+            try: await sbot.send_message(SUPER_CHAT, txt)
+            except Exception: pass
+        except Exception:
+            log.exception("heartbeat_to_group failed")
+        await asyncio.sleep(HB_SECONDS)
+
+
 async def main():
     global BOT_INSTANCE
     load_auto()
-    if MASTER_API_URL and INSTANCE_API_KEY:
-        asyncio.create_task(_master_heartbeat_loop(), name="master-heartbeat")
-        log.info("Central master monitoring enabled (instance=%s)", INSTANCE_ID)
-    else:
-        log.info("Central master monitoring disabled; set MASTER_API_URL and INSTANCE_API_KEY to enable")
     bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     BOT_INSTANCE = bot
-    bot.session.middleware(PremiumMW())   # premium emoji can be added live with /setemoji or /setpack
-    bot.session.middleware(BoldMW())      # all outgoing text bold by default, toggle with /boldon /boldoff
+    bot.session.middleware(PremiumMW())
+    bot.session.middleware(BoldMW())
+    emit("boot", None, detail=f"main bot started for {DEPLOY_ID}")
+
     for tg_id, session, owner in db.execute("SELECT id, session, owner FROM clients").fetchall():
         try:
             await start_client(fernet.decrypt(session).decode(), tg_id, owner or OWNER_ID)
@@ -2644,28 +2590,32 @@ async def main():
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            log.exception("client %s failed to start", tg_id)
-            await _notify_error(bot, OWNER_ID, exc, f"startup client {tg_id}")
+            emit("error", owner or OWNER_ID, ok=0, detail=f"startup client {tg_id}: {exc}")
+
     try:
-        await bot.send_message(OWNER_ID, "🟢 <b>Bot চালু হয়েছে</b>\nSelf-healing monitor সক্রিয়।")
+        await bot.send_message(OWNER_ID, f"🟢 <b>Bot চালু হয়েছে</b> ({h(DEPLOY_ID)})")
     except Exception:
-        log.warning("startup notification could not be sent to owner")
-    # Guarded tasks automatically restart if their own coroutine crashes.
-    asyncio.create_task(
-        _run_guarded_background("auto-view-react-watcher", watcher, bot),
-        name="guard-auto-view-react-watcher",
-    )
-    asyncio.create_task(
-        _run_guarded_background("self-healing-supervisor", lambda: self_healing_supervisor(bot), bot),
-        name="guard-self-healing-supervisor",
-    )
-    asyncio.create_task(
-        _run_guarded_background("runtime-health-monitor", lambda: _runtime_health_monitor(bot), bot),
-        name="guard-runtime-health-monitor",
-    )
-    log.info("Bot startup complete; runtime self-healing monitors are active.")
+        pass
+
+    asyncio.create_task(_run_guarded_background("auto-view-react-watcher", watcher, bot))
+    asyncio.create_task(_run_guarded_background("self-healing-supervisor", lambda: self_healing_supervisor(bot), bot))
+    asyncio.create_task(_run_guarded_background("runtime-health-monitor", lambda: _runtime_health_monitor(bot), bot))
+    asyncio.create_task(_run_guarded_background("heartbeat", heartbeat_loop, bot))
+    asyncio.create_task(_watchdog())
+
+    if SUPER_TOKEN and SUPER_CHAT:
+        try:
+            sbot = Bot(SUPER_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+            asyncio.create_task(heartbeat_to_group(sbot))
+        except Exception as exc:
+            log.warning("group heartbeat setup failed: %r", exc)
+
+    log.info("Main bot startup complete.")
     await dp.start_polling(bot)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    if len(sys.argv) > 1 and sys.argv[1].lower() == "super":
+        asyncio.run(super_main())
+    else:
+        asyncio.run(main())
