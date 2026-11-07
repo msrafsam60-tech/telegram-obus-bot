@@ -29,7 +29,7 @@ from pyrogram import Client, filters
 from pyrogram.handlers import MessageHandler
 from pyrogram.errors import (FloodWait, SessionPasswordNeeded, PhoneCodeInvalid,
                              PhoneCodeExpired, PasswordHashInvalid, UserAlreadyParticipant,
-                             AuthTokenExpired, SendCodeUnavailable)
+                             AuthTokenExpired)
 from pyrogram.raw.functions.messages import GetMessagesViews
 from pyrogram.qrlogin import QRLogin
 from pytgcalls import PyTgCalls
@@ -47,7 +47,7 @@ load_dotenv()  # load .env before reading either mode configuration
 CONFIG_RUN_MODE = "client"  # change to "master" only on the central server
 CONFIG_MASTER_BOT_TOKEN = "8791254182:AAGyEgUCnYHltJ_I2tOKsxY8N-YO7tRewiE"
 CONFIG_MASTER_OWNER_ID = "6753121703"
-CONFIG_MASTER_API_KEY = "HoV4TSNhhO11tbiTBF4YhopoF5rCGo8z"  # use a unique secret; keep private
+CONFIG_MASTER_API_KEY = "Tcslbs1MkniybHdMjsUPNiD98jwa6Cle"  # use a unique secret; keep private
 
 RUN_MODE = os.environ.get("RUN_MODE", CONFIG_RUN_MODE).strip().lower()
 MASTER_BOT_TOKEN = os.environ.get("MASTER_BOT_TOKEN", CONFIG_MASTER_BOT_TOKEN)
@@ -170,7 +170,7 @@ log = logging.getLogger("bot")
 # নিরাপত্তার জন্য public/shared code-এ আসল token না রেখে private deployment-এ বসানো ভালো।
 CONFIG_BOT_TOKEN = "8791254182:AAGyEgUCnYHltJ_I2tOKsxY8N-YO7tRewiE"
 CONFIG_API_ID = "35226105"
-CONFIG_API_HASH = "75a5bb939ff915ca7d23f6ef470fdd3d"
+CONFIG_API_HASH = "PASTE_API_HASH_HERE"
 CONFIG_OWNER_ID = "6753121703"
 
 _CONFIG_VALUES = {
@@ -195,7 +195,7 @@ DATA_DIR = os.environ.get("DATA_DIR", ".")
 os.makedirs(DATA_DIR, exist_ok=True)
 DELAY = float(os.environ.get("DELAY", "1"))  # seconds between accounts (FloodWait protection)
 BOOT_TIME = time.time()
-DEV_CONTACT = os.environ.get("DEV_CONTACT", "@your_username_here")  # set this in .env, shown on 👨‍💻 Developer button
+DEV_CONTACT = os.environ.get("DEV_CONTACT", "@Rafsanvai0")  # set this in .env, shown on 👨‍💻 Developer button
 
 # ====== Optional Central Master Monitoring ======
 # Set MASTER_API_URL and INSTANCE_API_KEY on every distributed bot copy.
@@ -1530,10 +1530,6 @@ async def resend_code_cmd(m: Message):
         sent = await p["app"].resend_code(p["phone"], p["hash"])
     except FloodWait as e:
         return await m.answer(f"⏳ Wait {e.value} seconds before resending.")
-    except SendCodeUnavailable:
-        return await m.answer("❌ Telegram has no more delivery methods left for this number "
-                               "(it already tried everything available). This number can't be verified "
-                               "from this bot. Try 🔳 Add by QR instead if the account is logged in on any phone.")
     except Exception as e:
         return await m.answer(f"❌ Resend failed: {h(e.__class__.__name__)}: {h(e)}")
     p["hash"] = sent.phone_code_hash
